@@ -51,7 +51,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().String("addr", envOr("REDIS_ADDR", "localhost:6379"), "Redis address")
 	root.PersistentFlags().String("repo", envOr("REPO_ID", "demo"), "repo id (room namespace)")
 	root.PersistentFlags().String("branch", envOr("BRANCH_NAME", "main"), "branch name (room namespace)")
-	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd())
+	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), hookCmd())
 	return root
 }
 
