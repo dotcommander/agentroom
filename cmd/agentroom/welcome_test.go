@@ -32,7 +32,7 @@ func TestPinWelcomeDedups(t *testing.T) {
 	}
 	welcomes := 0
 	for _, m := range msgs {
-		if m.Values["type"] == "WELCOME" {
+		if m.Values["type"] == welcomeType {
 			welcomes++
 		}
 	}

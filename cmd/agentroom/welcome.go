@@ -12,6 +12,8 @@ import (
 // welcomeCmd posts (or refreshes) the canonical welcome announcement in the
 // lobby and strips its TTL so it never ages out — the single source of truth for
 // the room's onboarding message.
+const welcomeType = "WELCOME"
+
 func welcomeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "welcome",
@@ -35,8 +37,6 @@ func welcomeCmd() *cobra.Command {
 // removes any prior WELCOME entries (so the lobby shows exactly one), publishes
 // the fresh welcome, and strips the stream's TTL so it never ages out. It
 // returns the new entry ID.
-//
-//nolint:goconst
 func pinWelcome(ctx context.Context, rdb *redis.Client, addr string) (string, error) {
 	cfg := agentroom.DefaultConfig()
 	cfg.RedisAddr = addr
@@ -48,7 +48,7 @@ func pinWelcome(ctx context.Context, rdb *redis.Client, addr string) (string, er
 	if prior, err := room.Recent(ctx, 1000); err == nil {
 		var stale []string
 		for _, e := range prior {
-			if e.Type == "WELCOME" {
+			if e.Type == welcomeType {
 				stale = append(stale, e.ID)
 			}
 		}
@@ -57,7 +57,7 @@ func pinWelcome(ctx context.Context, rdb *redis.Client, addr string) (string, er
 		}
 	}
 
-	ev := &agentroom.Event{Type: "WELCOME", AgentID: "concierge", Payload: welcomePayload()}
+	ev := &agentroom.Event{Type: welcomeType, AgentID: "concierge", Payload: welcomePayload()}
 	if err := room.Publish(ctx, ev); err != nil {
 		return "", err
 	}
