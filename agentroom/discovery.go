@@ -16,6 +16,19 @@ const (
 	taskDoneSuffix  = ":done"
 )
 
+type taskStateKeys struct {
+	done  string
+	owner string
+}
+
+func (r *Room) taskStateKeys(taskID string) taskStateKeys {
+	base := r.cfg.TaskKey(taskID)
+	return taskStateKeys{
+		done:  base + taskDoneSuffix,
+		owner: base + taskOwnerSuffix,
+	}
+}
+
 // RegisterTask advertises a task definition in the room catalog so other agents
 // can discover what work exists and what each type expects. Re-registering a
 // type overwrites it. The catalog inherits the stream's idle-expiry lease.
@@ -68,10 +81,8 @@ if redis.call('set', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 else r
 // claimable again. This is the cross-agent guard the consumer group cannot
 // provide: it stops two different agent types from doing the same work.
 func (r *Room) Claim(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error) {
-	keys := []string{
-		r.cfg.TaskKey(taskID) + taskDoneSuffix,
-		r.cfg.TaskKey(taskID) + taskOwnerSuffix,
-	}
+	taskKeys := r.taskStateKeys(taskID)
+	keys := []string{taskKeys.done, taskKeys.owner}
 	res, err := claimScript.Run(ctx, r.rdb, keys, owner, ttl.Milliseconds()).Int()
 	if err != nil {
 		return false, fmt.Errorf("agentroom: claim %s: %w", taskID, err)
@@ -82,9 +93,10 @@ func (r *Room) Claim(ctx context.Context, taskID, owner string, ttl time.Duratio
 // Complete marks a task done with an optional result (may be nil) and releases
 // the claim, so no other agent will pick it up.
 func (r *Room) Complete(ctx context.Context, taskID string, result []byte) error {
+	taskKeys := r.taskStateKeys(taskID)
 	pipe := r.rdb.Pipeline()
-	pipe.Set(ctx, r.cfg.TaskKey(taskID)+taskDoneSuffix, result, r.cfg.StreamTTL)
-	pipe.Del(ctx, r.cfg.TaskKey(taskID)+taskOwnerSuffix)
+	pipe.Set(ctx, taskKeys.done, result, r.cfg.StreamTTL)
+	pipe.Del(ctx, taskKeys.owner)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("agentroom: complete %s: %w", taskID, err)
 	}
@@ -94,14 +106,15 @@ func (r *Room) Complete(ctx context.Context, taskID string, result []byte) error
 // TaskState reports a task's coordination state: TaskDone (with Result),
 // TaskClaimed (with Owner), or TaskOpen.
 func (r *Room) TaskState(ctx context.Context, taskID string) (TaskStatus, error) {
-	res, err := r.rdb.Get(ctx, r.cfg.TaskKey(taskID)+taskDoneSuffix).Bytes()
+	taskKeys := r.taskStateKeys(taskID)
+	res, err := r.rdb.Get(ctx, taskKeys.done).Bytes()
 	if err == nil {
 		return TaskStatus{State: TaskDone, Result: res}, nil
 	}
 	if !errors.Is(err, redis.Nil) {
 		return TaskStatus{}, fmt.Errorf("agentroom: task state %s: %w", taskID, err)
 	}
-	owner, err := r.rdb.Get(ctx, r.cfg.TaskKey(taskID)+taskOwnerSuffix).Result()
+	owner, err := r.rdb.Get(ctx, taskKeys.owner).Result()
 	if err == nil {
 		return TaskStatus{State: TaskClaimed, Owner: owner}, nil
 	}

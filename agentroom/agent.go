@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -154,7 +153,7 @@ func (rt *Runtime) publishError(ctx context.Context, execErr error) {
 // an already-existing group.
 func (rt *Runtime) ensureGroup(ctx context.Context, stream, group string) error {
 	err := rt.room.rdb.XGroupCreateMkStream(ctx, stream, group, "$").Err()
-	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+	if err != nil && !redis.HasErrorPrefix(err, "BUSYGROUP") {
 		return fmt.Errorf("agentroom: create group %s on %s: %w", group, stream, err)
 	}
 	return nil
