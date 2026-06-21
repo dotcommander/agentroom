@@ -110,3 +110,14 @@ func TestEventJSONRoundTrip(t *testing.T) {
 		t.Errorf("round trip mismatch: got %+v want %+v", out, in)
 	}
 }
+
+func TestConfigCatalogAndTaskKeys(t *testing.T) {
+	t.Parallel()
+	cfg := Config{RepoID: "svc", BranchName: "dev"}
+	if got, want := cfg.CatalogKey(), "repo:svc:dev:catalog"; got != want {
+		t.Errorf("CatalogKey() = %q, want %q", got, want)
+	}
+	if got, want := cfg.TaskKey("t-9"), "repo:svc:dev:task:t-9"; got != want {
+		t.Errorf("TaskKey() = %q, want %q", got, want)
+	}
+}

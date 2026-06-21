@@ -57,6 +57,51 @@ func (c Config) ScratchpadPrefix() string {
 	return "repo:" + c.RepoID + ":" + c.BranchName + ":state:"
 }
 
+// CatalogKey is the Redis hash holding this room's self-describing task catalog
+// (task type -> TaskDef). Agents read it to discover what work the room knows.
+func (c Config) CatalogKey() string {
+	return "repo:" + c.RepoID + ":" + c.BranchName + ":catalog"
+}
+
+// TaskKey is the base key for one task's coordination state, suffixed with
+// ":owner" (the claim lease) and ":done" (the completion record).
+func (c Config) TaskKey(id string) string {
+	return "repo:" + c.RepoID + ":" + c.BranchName + ":task:" + id
+}
+
+// Task coordination states reported by TaskState.
+const (
+	TaskOpen    = "open"
+	TaskClaimed = "claimed"
+	TaskDone    = "done"
+)
+
+// TaskDef is the self-describing contract for a task type: what it means, what
+// an agent should emit on success, and what capability it needs. Agents publish
+// these to the catalog so others can discover how to participate.
+type TaskDef struct {
+	Type        string `json:"type"`        // task/event type, e.g. "TESTS_FAILED"
+	Description string `json:"description"` // what it means and when it applies
+	Produces    string `json:"produces"`    // event type emitted on success
+	Requires    string `json:"requires"`    // capability an agent needs to handle it
+}
+
+// Task is a unit of work derived from a catalogued stream event, identified by
+// the triggering event's stream entry ID.
+type Task struct {
+	ID      string          `json:"id"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// TaskStatus is the coordination state of a task: TaskOpen (claimable),
+// TaskClaimed (Owner set), or TaskDone (Result set).
+type TaskStatus struct {
+	State  string          `json:"state"`
+	Owner  string          `json:"owner,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
 // matches reports whether a worker subscribed to interests should receive an
 // event of eventType. "*" subscribes to everything.
 func matches(interests []string, eventType string) bool {
