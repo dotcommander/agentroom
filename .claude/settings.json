@@ -9,6 +9,16 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/go/bin/agentroom hook session-end"
+          }
+        ]
+      }
     ]
   }
 }
