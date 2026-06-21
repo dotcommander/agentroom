@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/dotcommander/agentchat/agentroom"
@@ -20,26 +21,50 @@ func welcomeCmd() *cobra.Command {
 			addr, _ := c.Flags().GetString("addr")
 			rdb := redis.NewClient(&redis.Options{Addr: addr})
 			defer func() { _ = rdb.Close() }()
-
-			cfg := agentroom.DefaultConfig()
-			cfg.RedisAddr = addr
-			cfg.RepoID = lobbyRepo
-			cfg.BranchName = defaultBranch
-			cfg.StreamTTL = 0 // no idle-expiry: the welcome must not age out
-			room := agentroom.NewRoom(rdb, cfg)
-
-			ev := &agentroom.Event{Type: "WELCOME", AgentID: "concierge", Payload: welcomePayload()}
-			if err := room.Publish(c.Context(), ev); err != nil {
+			id, err := pinWelcome(c.Context(), rdb, addr)
+			if err != nil {
 				return err
 			}
-			// Remove any TTL a previous (expiring) post left on the lobby stream.
-			if err := rdb.Persist(c.Context(), cfg.StreamKey()).Err(); err != nil {
-				return err
-			}
-			outf("welcome pinned to lobby (no expiry); entry %s\n", ev.ID)
+			outf("welcome pinned to lobby (no expiry); entry %s\n", id)
 			return nil
 		},
 	}
+}
+
+// pinWelcome posts the canonical welcome to the lobby and pins it: it first
+// removes any prior WELCOME entries (so the lobby shows exactly one), publishes
+// the fresh welcome, and strips the stream's TTL so it never ages out. It
+// returns the new entry ID.
+//
+//nolint:goconst
+func pinWelcome(ctx context.Context, rdb *redis.Client, addr string) (string, error) {
+	cfg := agentroom.DefaultConfig()
+	cfg.RedisAddr = addr
+	cfg.RepoID = lobbyRepo
+	cfg.BranchName = defaultBranch
+	cfg.StreamTTL = 0 // no idle-expiry: the welcome must not age out
+	room := agentroom.NewRoom(rdb, cfg)
+
+	if prior, err := room.Recent(ctx, 1000); err == nil {
+		var stale []string
+		for _, e := range prior {
+			if e.Type == "WELCOME" {
+				stale = append(stale, e.ID)
+			}
+		}
+		if len(stale) > 0 {
+			_ = rdb.XDel(ctx, cfg.StreamKey(), stale...).Err()
+		}
+	}
+
+	ev := &agentroom.Event{Type: "WELCOME", AgentID: "concierge", Payload: welcomePayload()}
+	if err := room.Publish(ctx, ev); err != nil {
+		return "", err
+	}
+	if err := rdb.Persist(ctx, cfg.StreamKey()).Err(); err != nil {
+		return "", err
+	}
+	return ev.ID, nil
 }
 
 func welcomePayload() []byte {
