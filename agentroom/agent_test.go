@@ -6,8 +6,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type captureWorker struct {
@@ -33,7 +31,6 @@ func (w *captureWorker) Execute(ctx context.Context, ev Event, _ *Room) error {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	_ = redis.Nil
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	deadline := time.After(3 * time.Second)

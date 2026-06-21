@@ -15,8 +15,9 @@ import (
 // Operational loop timing (not user-facing config — internal scheduling floors).
 const (
 	// blockDuration bounds each XREADGROUP wait so the loop periodically wakes to
-	// check ctx and reclaim stale entries; it is not a delivery-latency cap.
-	blockDuration = 5 * time.Second
+	// check ctx and reclaim stale entries; it also bounds graceful-shutdown
+	// latency, observed at the next loop top after cancellation.
+	blockDuration = 2 * time.Second
 	// claimMinIdle is how long a pending entry must sit idle before another
 	// consumer may reclaim it (recovering work abandoned by a crashed worker).
 	claimMinIdle = 30 * time.Second
@@ -64,31 +65,13 @@ func (rt *Runtime) Listen(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		type readResult struct {
-			streams []redis.XStream
-			err     error
-		}
-		resultCh := make(chan readResult, 1)
-		go func() {
-			res, err := rt.room.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-				Group:    group,
-				Consumer: rt.worker.ID(),
-				Streams:  []string{stream, ">"},
-				Count:    1,
-				Block:    blockDuration,
-			}).Result()
-			resultCh <- readResult{res, err}
-		}()
-
-		var res []redis.XStream
-		var err error
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case rr := <-resultCh:
-			res, err = rr.streams, rr.err
-		}
-
+		res, err := rt.room.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    group,
+			Consumer: rt.worker.ID(),
+			Streams:  []string{stream, ">"},
+			Count:    1,
+			Block:    blockDuration,
+		}).Result()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				return ctx.Err()
