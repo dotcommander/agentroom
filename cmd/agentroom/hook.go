@@ -144,12 +144,7 @@ func openLines(tasks []agentroom.Task) []string {
 }
 
 func previewPayload(p []byte) string {
-	s := strings.TrimSpace(string(p))
-	r := []rune(s)
-	if len(r) > 200 {
-		return string(r[:200]) + "..."
-	}
-	return s
+	return clip(string(p), 200)
 }
 
 func roomCfg(addr, repo, branch string) agentroom.Config {
