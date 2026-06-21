@@ -54,24 +54,29 @@ func (r *Room) Catalog(ctx context.Context) (map[string]TaskDef, error) {
 	return defs, nil
 }
 
+// claimScript atomically claims a task in one round trip: it sets the owner
+// lease only if the task is neither done nor already owned, eliminating the
+// check-then-set race a separate EXISTS + SETNX would have.
+var claimScript = redis.NewScript(`
+if redis.call('exists', KEYS[1]) == 1 then return 0 end
+if redis.call('set', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 else return 0 end
+`)
+
 // Claim atomically takes ownership of a task for owner. It returns true on
 // success, or false if another agent already holds it or it is already done.
 // The claim is a lease expiring after ttl, so a crashed owner's task becomes
 // claimable again. This is the cross-agent guard the consumer group cannot
 // provide: it stops two different agent types from doing the same work.
 func (r *Room) Claim(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error) {
-	done, err := r.rdb.Exists(ctx, r.cfg.TaskKey(taskID)+taskDoneSuffix).Result()
-	if err != nil {
-		return false, fmt.Errorf("agentroom: check done %s: %w", taskID, err)
+	keys := []string{
+		r.cfg.TaskKey(taskID) + taskDoneSuffix,
+		r.cfg.TaskKey(taskID) + taskOwnerSuffix,
 	}
-	if done > 0 {
-		return false, nil
-	}
-	ok, err := r.rdb.SetNX(ctx, r.cfg.TaskKey(taskID)+taskOwnerSuffix, owner, ttl).Result()
+	res, err := claimScript.Run(ctx, r.rdb, keys, owner, ttl.Milliseconds()).Int()
 	if err != nil {
 		return false, fmt.Errorf("agentroom: claim %s: %w", taskID, err)
 	}
-	return ok, nil
+	return res == 1, nil
 }
 
 // Complete marks a task done with an optional result (may be nil) and releases
