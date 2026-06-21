@@ -17,7 +17,8 @@ import (
 
 // sessionStartInput is the subset of the SessionStart hook stdin we use.
 type sessionStartInput struct {
-	CWD string `json:"cwd"`
+	CWD       string `json:"cwd"`
+	SessionID string `json:"session_id"`
 }
 
 func hookCmd() *cobra.Command {
@@ -45,6 +46,7 @@ func sessionStart(c *cobra.Command) error {
 	addr, _ := c.Flags().GetString("addr")
 	in := readSessionInput()
 	repo, branch := resolveRoom(in.CWD)
+	joinLobby(c.Context(), addr, repo, branch, in.SessionID)
 	digest := buildDigest(c.Context(), addr, repo, branch)
 	if digest == "" {
 		return nil
@@ -119,6 +121,27 @@ func buildDigest(ctx context.Context, addr, repo, branch string) string {
 	lines = append(lines, openLines(open)...)
 	lines = append(lines, "", "How to use: `agentroom tail` to watch, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
 	return strings.Join(lines, "\n")
+}
+
+// joinLobby posts a best-effort AGENT_JOINED to the global lobby room so every
+// session is visible cross-repo, recording which local room it belongs to. It
+// publishes with StreamTTL=0 so it never re-arms expiry on the persistent lobby
+// stream (the welcome banner relies on that). Never fails the session.
+func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer func() { _ = rdb.Close() }()
+	cfg := roomCfg(addr, lobbyRepo, defaultBranch)
+	cfg.StreamTTL = 0
+	lobby := agentroom.NewRoom(rdb, cfg)
+	payload, err := json.Marshal(map[string]any{"room": fmt.Sprintf("%s:%s", repo, branch)})
+	if err != nil {
+		return
+	}
+	_ = lobby.Publish(ctx, &agentroom.Event{
+		Type:    "AGENT_JOINED",
+		AgentID: shortSession(sessionID),
+		Payload: payload,
+	})
 }
 
 func eventLines(events []agentroom.Event) []string {
