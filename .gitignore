@@ -1,0 +1,8 @@
+# Binaries
+/agentroomd
+/cmd/agentroomd/agentroomd
+*.test
+*.out
+
+# Scratch
+.work/
