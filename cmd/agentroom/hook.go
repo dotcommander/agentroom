@@ -106,6 +106,10 @@ func buildDigest(ctx context.Context, addr, repo, branch string) string {
 	lines := []string{
 		fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", repo, branch),
 		"",
+		"Sign in -- tell the room who you are and what you're here to do:",
+		"  agentroom post AGENT_JOINED '{\"role\":\"<what you do>\",\"working_on\":\"<your goal>\"}' --agent <your-handle>",
+		"(free-form; no required schema)",
+		"",
 		"== lobby (global announcements) ==",
 	}
 	lines = append(lines, eventLines(lobbyEvents)...)

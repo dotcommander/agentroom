@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -47,6 +48,19 @@ func envOr(key, def string) string {
 	return def
 }
 
+// defaultRepo is the default room namespace: REPO_ID if set, else the current
+// directory's basename -- so ad-hoc CLI use targets this repo's room, matching
+// what the SessionStart hook derives.
+func defaultRepo() string {
+	if v := os.Getenv("REPO_ID"); v != "" {
+		return v
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return filepath.Base(wd)
+	}
+	return "demo"
+}
+
 func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:          "agentroom",
@@ -54,7 +68,7 @@ func rootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	root.PersistentFlags().String("addr", envOr("REDIS_ADDR", "localhost:6379"), "Redis address")
-	root.PersistentFlags().String("repo", envOr("REPO_ID", "demo"), "repo id (room namespace)")
+	root.PersistentFlags().String("repo", defaultRepo(), "repo id (room namespace)")
 	root.PersistentFlags().String("branch", envOr("BRANCH_NAME", "main"), "branch name (room namespace)")
 	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), hookCmd(), welcomeCmd())
 	return root
