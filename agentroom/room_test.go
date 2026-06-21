@@ -85,3 +85,27 @@ func TestScratchpadRoundTrip(t *testing.T) {
 		t.Errorf("missing key error = %v, want redis.Nil", err)
 	}
 }
+
+func TestRecentReturnsChronological(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	for _, typ := range []string{"A", "B", "C"} {
+		if err := room.Publish(ctx, &Event{Type: typ, AgentID: "p"}); err != nil {
+			t.Fatalf("publish %s: %v", typ, err)
+		}
+	}
+	events, err := room.Recent(ctx, 10)
+	if err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("recent = %d events, want 3", len(events))
+	}
+	if events[0].Type != "A" || events[2].Type != "C" {
+		t.Errorf("order = [%s..%s], want A..C (chronological)", events[0].Type, events[2].Type)
+	}
+}

@@ -72,3 +72,18 @@ func (r *Room) ReadScratchpad(ctx context.Context, key string) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// Recent returns up to count of the most recent events on the room stream, in
+// chronological order (oldest first). It is the read-side counterpart to Publish
+// and the primitive behind "what is happening in this room right now".
+func (r *Room) Recent(ctx context.Context, count int64) ([]Event, error) {
+	msgs, err := r.rdb.XRevRangeN(ctx, r.cfg.StreamKey(), "+", "-", count).Result()
+	if err != nil {
+		return nil, fmt.Errorf("agentroom: recent: %w", err)
+	}
+	events := make([]Event, len(msgs))
+	for i, msg := range msgs {
+		events[len(msgs)-1-i] = decodeEvent(msg)
+	}
+	return events, nil
+}
