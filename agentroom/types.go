@@ -32,6 +32,10 @@ type Config struct {
 	Group            string        // consumer-group name for Runtime delivery
 }
 
+// defaultGroup is the fallback consumer-group name used when Config.Group is
+// unset; single source of truth for DefaultConfig and Runtime.group.
+const defaultGroup = "agents"
+
 // DefaultConfig returns the documented fallback tunables. This is the single
 // sanctioned home for these literals; callers override per environment.
 func DefaultConfig() Config {
@@ -39,7 +43,7 @@ func DefaultConfig() Config {
 		RedisAddr:        "localhost:6379",
 		StreamTTL:        48 * time.Hour,
 		ArchiveThreshold: 10000,
-		Group:            "agents",
+		Group:            defaultGroup,
 	}
 }
 

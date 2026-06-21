@@ -84,7 +84,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ArchiveThreshold != 10000 {
 		t.Errorf("ArchiveThreshold = %d, want 10000", cfg.ArchiveThreshold)
 	}
-	if cfg.Group != "agents" {
+	if cfg.Group != defaultGroup {
 		t.Errorf("Group = %q, want agents", cfg.Group)
 	}
 }

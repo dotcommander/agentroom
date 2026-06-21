@@ -65,30 +65,39 @@ func (rt *Runtime) Listen(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res, err := rt.room.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-			Group:    group,
-			Consumer: rt.worker.ID(),
-			Streams:  []string{stream, ">"},
-			Count:    1,
-			Block:    blockDuration,
-		}).Result()
-		if err != nil {
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if errors.Is(err, redis.Nil) {
-				rt.reclaim(ctx, stream, group)
-				continue
-			}
+		res, err := rt.readGroup(ctx, stream, group)
+		switch {
+		case err == nil:
+			rt.dispatch(ctx, stream, group, res)
+		case errors.Is(err, context.Canceled) || ctx.Err() != nil:
+			return ctx.Err()
+		case errors.Is(err, redis.Nil):
+			rt.reclaim(ctx, stream, group)
+		default:
 			if !rt.wait(ctx, blockDuration) {
 				return ctx.Err()
 			}
-			continue
 		}
-		for _, st := range res {
-			for _, msg := range st.Messages {
-				rt.handle(ctx, stream, group, msg)
-			}
+	}
+}
+
+// readGroup performs one blocking consumer-group read for never-delivered
+// entries assigned to this worker.
+func (rt *Runtime) readGroup(ctx context.Context, stream, group string) ([]redis.XStream, error) {
+	return rt.room.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    group,
+		Consumer: rt.worker.ID(),
+		Streams:  []string{stream, ">"},
+		Count:    1,
+		Block:    blockDuration,
+	}).Result()
+}
+
+// dispatch hands every entry in a read result to handle.
+func (rt *Runtime) dispatch(ctx context.Context, stream, group string, res []redis.XStream) {
+	for _, st := range res {
+		for _, msg := range st.Messages {
+			rt.handle(ctx, stream, group, msg)
 		}
 	}
 }
@@ -168,7 +177,7 @@ func (rt *Runtime) group() string {
 	if rt.room.cfg.Group != "" {
 		return rt.room.cfg.Group
 	}
-	return "agents"
+	return defaultGroup
 }
 
 // decodeEvent defensively reconstructs an Event from a stream entry, tolerating
