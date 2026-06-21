@@ -83,7 +83,7 @@ func resolveRoom(cwd string) (string, string) {
 	}
 	branch := os.Getenv("BRANCH_NAME")
 	if branch == "" {
-		branch = "main"
+		branch = defaultBranch
 	}
 	return repo, branch
 }
@@ -93,7 +93,7 @@ func resolveRoom(cwd string) (string, string) {
 func buildDigest(ctx context.Context, addr, repo, branch string) string {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	defer func() { _ = rdb.Close() }()
-	lobby := agentroom.NewRoom(rdb, roomCfg(addr, "lobby", "main"))
+	lobby := agentroom.NewRoom(rdb, roomCfg(addr, lobbyRepo, defaultBranch))
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
 	lobbyEvents, err := lobby.Recent(ctx, 3)
