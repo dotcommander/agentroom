@@ -90,19 +90,21 @@ func resolveRoom(cwd string) (string, string) {
 	return repo, branch
 }
 
-// buildDigest gathers lobby announcements, recent local activity, and open
-// tasks. Returns "" if redis is unreachable so the session is never blocked.
+// buildDigest reports who is currently present in the local room (derived from
+// the recent event stream) plus open tasks. Returns "" if redis is unreachable
+// so the session is never blocked. The noisy lobby and raw recent-activity
+// feeds are intentionally omitted — use `agentroom tail` for the full feed.
 func buildDigest(ctx context.Context, addr, repo, branch string) string {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	defer func() { _ = rdb.Close() }()
-	lobby := agentroom.NewRoom(rdb, roomCfg(addr, lobbyRepo, defaultBranch))
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
-	lobbyEvents, err := lobby.Recent(ctx, 3)
+	// Pull a wide window so the AGENT_JOINED that establishes presence isn't
+	// missed; presence is folded down to the live set below.
+	recent, err := local.Recent(ctx, 100)
 	if err != nil {
 		return ""
 	}
-	localEvents, _ := local.Recent(ctx, 8)
 	open, _ := local.OpenTasks(ctx, 50)
 
 	lines := []string{
@@ -112,15 +114,80 @@ func buildDigest(ctx context.Context, addr, repo, branch string) string {
 		"  agentroom post AGENT_JOINED '{\"role\":\"<what you do>\",\"working_on\":\"<your goal>\"}' --agent <your-handle>",
 		"(free-form; no required schema)",
 		"",
-		"== lobby (global announcements) ==",
+		"== who's here ==",
 	}
-	lines = append(lines, eventLines(lobbyEvents)...)
-	lines = append(lines, "", "== this room -- recent activity ==")
-	lines = append(lines, eventLines(localEvents)...)
+	lines = append(lines, presenceLines(recent)...)
 	lines = append(lines, "", "== open tasks you could claim ==")
 	lines = append(lines, openLines(open)...)
-	lines = append(lines, "", "How to use: `agentroom tail` to watch, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
+	lines = append(lines, "", "How to use: `agentroom tail` to watch the full feed, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
 	return strings.Join(lines, "\n")
+}
+
+// presenceLines derives live presence from the recent event stream (ordered
+// oldest->newest): an agent is "here" when its latest verb is AGENT_JOINED with
+// no later SESSION_ENDED. Without a heartbeat/TTL this is best-effort — an agent
+// that dies without posting SESSION_ENDED lingers until it ages out of the
+// stream window.
+func presenceLines(events []agentroom.Event) []string {
+	type pres struct {
+		desc string
+		on   bool
+	}
+	order := make([]string, 0)
+	seen := map[string]*pres{}
+	for _, e := range events {
+		p := seen[e.AgentID]
+		if p == nil {
+			p = &pres{}
+			seen[e.AgentID] = p
+			order = append(order, e.AgentID)
+		}
+		switch e.Type {
+		case "AGENT_JOINED":
+			p.on = true
+			if d := joinDesc(e.Payload); d != "" {
+				p.desc = d
+			}
+		case "SESSION_ENDED":
+			p.on = false
+		}
+	}
+	lines := make([]string, 0, len(order))
+	for _, id := range order {
+		p := seen[id]
+		if !p.on {
+			continue
+		}
+		if p.desc != "" {
+			lines = append(lines, fmt.Sprintf("  %s -- %s", id, p.desc))
+		} else {
+			lines = append(lines, "  "+id)
+		}
+	}
+	if len(lines) == 0 {
+		return []string{"(nobody else here)"}
+	}
+	return lines
+}
+
+// joinDesc renders an AGENT_JOINED payload as "role: working_on" (either may be
+// absent). Returns "" if neither field is present.
+func joinDesc(p []byte) string {
+	var j struct {
+		Role      string `json:"role"`
+		WorkingOn string `json:"working_on"`
+	}
+	if json.Unmarshal(p, &j) != nil {
+		return ""
+	}
+	switch {
+	case j.Role != "" && j.WorkingOn != "":
+		return clip(j.Role+": "+j.WorkingOn, 160)
+	case j.Role != "":
+		return clip(j.Role, 160)
+	default:
+		return clip(j.WorkingOn, 160)
+	}
 }
 
 // joinLobby posts a best-effort AGENT_JOINED to the global lobby room so every
@@ -144,17 +211,6 @@ func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
 	})
 }
 
-func eventLines(events []agentroom.Event) []string {
-	if len(events) == 0 {
-		return []string{"(none)"}
-	}
-	lines := make([]string, 0, len(events))
-	for _, e := range events {
-		lines = append(lines, fmt.Sprintf("  [%s] %s -- %s", e.Type, e.AgentID, previewPayload(e.Payload)))
-	}
-	return lines
-}
-
 func openLines(tasks []agentroom.Task) []string {
 	if len(tasks) == 0 {
 		return []string{"(none)"}
@@ -164,10 +220,6 @@ func openLines(tasks []agentroom.Task) []string {
 		lines = append(lines, fmt.Sprintf("  %s  %s", t.ID, t.Type))
 	}
 	return lines
-}
-
-func previewPayload(p []byte) string {
-	return clip(string(p), 200)
 }
 
 func roomCfg(addr, repo, branch string) agentroom.Config {
