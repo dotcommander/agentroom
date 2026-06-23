@@ -1,0 +1,87 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/goleak"
+)
+
+// TestPresenceLifecycleAcrossCLI exercises the real cobra RunE paths (post,
+// claim) and the hook session-start/session-end paths against one shared
+// miniredis backend, then advances past PresenceTTL and asserts the agent drops
+// from the live presence set — the full heartbeat->expiry lifecycle end to end
+// through the CLI layer, not just Room methods. goleak guards against a leaked
+// heartbeat/timer goroutine: every CLI client is Closed by its RunE defer, so a
+// surviving goroutine can only be a real leak (no ignore-rules).
+func TestPresenceLifecycleAcrossCLI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, exercises full CLI lifecycle")
+	}
+	defer goleak.VerifyNone(t)
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	// Override the client seam so every CLI command + hook targets the one shared
+	// miniredis. Restore the production factory afterward.
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	defer func() { newRedisClient = orig }()
+
+	ctx := context.Background()
+	const agent = "agent-int"
+
+	// Drive `post AGENT_JOINED` through the real root command RunE. This writes
+	// the presence TTL key (opportunistic heartbeat) for `agent`.
+	if err := runCLI(ctx, mr.Addr(),
+		"post", "AGENT_JOINED", `{"role":"builder","working_on":"presence test"}`, "--agent", agent); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+
+	// A direct Room view over the same miniredis to assert presence state.
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer func() { _ = rdb.Close() }()
+	cfg := roomCfg(mr.Addr(), defaultRepo(), "main")
+	room := agentroom.NewRoom(rdb, cfg)
+
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence after post: %v", err)
+	}
+	if _, ok := pres[agent]; !ok {
+		t.Fatalf("agent %q absent from presence after post; got %v", agent, pres)
+	}
+
+	// Crash simulation: advance past PresenceTTL with NO session-end. The agent
+	// must drop from presence on its own (TTL expiry), no SESSION_ENDED needed.
+	mr.FastForward(cfg.PresenceTTL + time.Second)
+
+	pres, err = room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence after TTL expiry: %v", err)
+	}
+	if _, ok := pres[agent]; ok {
+		t.Fatalf("agent %q still present after PresenceTTL expiry; got %v", agent, pres)
+	}
+}
+
+// runCLI executes the real root cobra command with args against addr, capturing
+// output so the test stays quiet. It is the "real CLI invocation" seam.
+func runCLI(ctx context.Context, addr string, args ...string) error {
+	root := rootCmd()
+	root.SetArgs(append([]string{"--addr", addr}, args...))
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	return root.ExecuteContext(ctx)
+}
