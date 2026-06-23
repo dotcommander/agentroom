@@ -16,6 +16,10 @@ const (
 	taskDoneSuffix  = ":done"
 )
 
+// taskKeyGlob matches every task coordination key for a room (Config.TaskKey
+// uses ":task:" as its segment); OutstandingClaims narrows to the owner leases.
+const taskKeyGlob = ":task:*"
+
 type taskStateKeys struct {
 	done  string
 	owner string
@@ -169,4 +173,33 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 		open = append(open, task)
 	}
 	return open, nil
+}
+
+// OutstandingClaims counts the tasks agentID currently holds a claim on but has
+// not completed — a self-derived, liveness-honest load signal (a crashed owner's
+// lease expires, so the count drops on its own). It SCANs this room's owner-lease
+// keys (cursor-based, never KEYS) and counts those whose value equals agentID.
+func (r *Room) OutstandingClaims(ctx context.Context, agentID string) (int, error) {
+	if agentID == "" {
+		return 0, nil
+	}
+	pattern := r.cfg.TaskKey("*") + taskOwnerSuffix
+	count := 0
+	iter := r.rdb.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		owner, err := r.rdb.Get(ctx, iter.Val()).Result()
+		if err != nil {
+			continue // lease expired between SCAN and GET — not an active claim
+		}
+		if owner == agentID {
+			count++
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, fmt.Errorf("agentroom: scan claims for %s: %w", agentID, err)
+	}
+	return count, nil
 }
