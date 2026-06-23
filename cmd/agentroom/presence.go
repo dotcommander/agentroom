@@ -39,7 +39,7 @@ func decodePresence(raw string) presenceValue {
 // calling session's own agent id and is omitted (you are not "someone else
 // here"). Output shape is preserved: "  <id> -- <desc>" (or "  <id>" when the
 // agent posted no role/working_on), and "(nobody else here)" when empty.
-func presenceLines(pres map[string]string, selfID string) []string {
+func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID string) int) []string {
 	ids := make([]string, 0, len(pres))
 	for id := range pres {
 		if id == selfID {
@@ -51,6 +51,9 @@ func presenceLines(pres map[string]string, selfID string) []string {
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
 		v := decodePresence(pres[id])
+		// claims is computed at render time (not stored) so the peer's
+		// label-preserving writer stays untouched; the count is always fresh.
+		v.Claims = claimsFor(id)
 		lines = append(lines, presenceLine(id, v))
 	}
 	if len(lines) == 0 {
@@ -109,4 +112,19 @@ func writeHeartbeat(ctx context.Context, room *agentroom.Room, agentID, desc str
 		return
 	}
 	_ = room.Heartbeat(ctx, agentID, desc, room.Config().PresenceTTL)
+}
+
+// claimsCounter returns a render-time claim-count lookup over room: for each
+// agent it reports OutstandingClaims (claimed-but-not-done tasks), the live
+// load signal shown as "(N claimed)". Errors degrade to 0 — the digest must
+// never fail on a count lookup. Kept here (not hook.go) to hold hook.go under
+// its line tripwire.
+func claimsCounter(ctx context.Context, room *agentroom.Room) func(agentID string) int {
+	return func(agentID string) int {
+		n, err := room.OutstandingClaims(ctx, agentID)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
 }

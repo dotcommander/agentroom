@@ -117,7 +117,7 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 		"",
 		"== who's here ==",
 	}
-	lines = append(lines, presenceLines(pres, selfID)...)
+	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
 	lines = append(lines, "", "== open tasks you could claim ==")
 	lines = append(lines, openLines(open)...)
 	lines = append(lines, "", "How to use: `agentroom tail` to watch the full feed, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")

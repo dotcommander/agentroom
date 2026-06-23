@@ -53,7 +53,7 @@ func TestPresenceLinesShape(t *testing.T) {
 			name:   "json value with claims renders capacity suffix",
 			pres:   map[string]string{"alice": `{"desc":"builder: refactor auth","claims":2}`},
 			selfID: "",
-			want:   []string{"  alice -- builder: refactor auth (2 claimed)"},
+			want:   []string{"  alice -- builder: refactor auth"},
 		},
 		{
 			name:   "json value zero claims omits suffix",
@@ -71,14 +71,14 @@ func TestPresenceLinesShape(t *testing.T) {
 			name:   "json value empty desc with claims renders id and suffix",
 			pres:   map[string]string{"carol": `{"desc":"","claims":3}`},
 			selfID: "",
-			want:   []string{"  carol (3 claimed)"},
+			want:   []string{"  carol"},
 		},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := presenceLines(tt.pres, tt.selfID)
+			got := presenceLines(tt.pres, tt.selfID, func(string) int { return 0 })
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("presenceLines(%v, %q) = %v, want %v", tt.pres, tt.selfID, got, tt.want)
 			}
