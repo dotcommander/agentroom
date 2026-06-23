@@ -88,3 +88,66 @@ func runCLI(ctx context.Context, addr string, args ...string) error {
 	root.SetErr(&bytes.Buffer{})
 	return root.ExecuteContext(ctx)
 }
+
+// TestClaimCountRendersAcrossCLI proves the render-time "(N claimed)" capacity
+// hint populates end to end: an agent signs in (post AGENT_JOINED sets its desc),
+// claims two tasks via the real CLI, and the rendered presence line carries its
+// live outstanding-claim count — through real Redis, not a stubbed counter.
+func TestClaimCountRendersAcrossCLI(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, exercises CLI claim + render")
+	}
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	const agent = "agent-d3"
+
+	// Sign in: sets the presence desc to "builder: capacity demo".
+	if err := runCLI(ctx, mr.Addr(),
+		"post", "AGENT_JOINED", `{"role":"builder","working_on":"capacity demo"}`, "--agent", agent); err != nil {
+		t.Fatalf("post AGENT_JOINED: %v", err)
+	}
+
+	// Claim two tasks as the agent via the real CLI claim path.
+	for _, id := range []string{"task-d3-1", "task-d3-2"} {
+		if err := runCLI(ctx, mr.Addr(), "claim", id, "--agent", agent); err != nil {
+			t.Fatalf("claim %s: %v", id, err)
+		}
+	}
+
+	// Render the presence line the way buildDigest does: live presence map +
+	// the render-time claims counter over the same room.
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), defaultRepo(), "main"))
+
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	lines := presenceLines(pres, "", claimsCounter(ctx, room))
+
+	want := "  " + agent + " -- builder: capacity demo (2 claimed)"
+	found := false
+	for _, l := range lines {
+		if l == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("rendered presence missing claim count.\n want line: %q\n got lines: %#v", want, lines)
+	}
+}
