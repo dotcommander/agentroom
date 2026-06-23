@@ -128,6 +128,9 @@ func postCmd() *cobra.Command {
 			if err := room.Publish(c.Context(), ev); err != nil {
 				return err
 			}
+			// Opportunistic heartbeat: every CLI call refreshes the agent's
+			// presence TTL key — this is the heartbeat in a daemonless CLI.
+			writeHeartbeat(c.Context(), room, agent, "")
 			outf("posted %s as %s (entry %s)\n", ev.Type, agent, ev.ID)
 			return nil
 		},
@@ -229,6 +232,7 @@ func claimCmd() *cobra.Command {
 				outf("task %s is already claimed or done -- skip it\n", args[0])
 				return nil
 			}
+			writeHeartbeat(c.Context(), room, agent, "")
 			outf("claimed task %s as %s (lease %s)\n", args[0], agent, ttl)
 			return nil
 		},
