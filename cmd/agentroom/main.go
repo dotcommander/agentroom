@@ -48,6 +48,14 @@ func envOr(key, def string) string {
 	return def
 }
 
+// newRedisClient is the seam through which every CLI command and hook obtains its
+// redis client. Production uses the default (a real client for --addr); tests
+// override this var to inject a single shared miniredis-backed client so a
+// goleak check sees one client lifecycle, not one pool per invocation.
+var newRedisClient = func(addr string) *redis.Client {
+	return redis.NewClient(&redis.Options{Addr: addr})
+}
+
 // defaultRepo is the default room namespace: REPO_ID if set, else the current
 // directory's basename -- so ad-hoc CLI use targets this repo's room, matching
 // what the SessionStart hook derives.
@@ -84,7 +92,7 @@ func roomFromFlags(cmd *cobra.Command) (*agentroom.Room, *redis.Client) {
 	cfg.RedisAddr = addr
 	cfg.RepoID = repo
 	cfg.BranchName = branch
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	rdb := newRedisClient(cfg.RedisAddr)
 	return agentroom.NewRoom(rdb, cfg), rdb
 }
 

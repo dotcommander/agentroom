@@ -21,7 +21,7 @@ func welcomeCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			addr, _ := c.Flags().GetString("addr")
-			rdb := redis.NewClient(&redis.Options{Addr: addr})
+			rdb := newRedisClient(addr)
 			defer func() { _ = rdb.Close() }()
 			id, err := pinWelcome(c.Context(), rdb, addr)
 			if err != nil {

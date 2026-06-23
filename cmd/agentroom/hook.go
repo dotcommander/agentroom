@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/dotcommander/agentchat/agentroom"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 )
 
@@ -97,7 +96,7 @@ func resolveRoom(cwd string) (string, string) {
 // so the session is never blocked. The noisy lobby and raw recent-activity
 // feeds are intentionally omitted — use `agentroom tail` for the full feed.
 func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string {
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
@@ -130,7 +129,7 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 // publishes with StreamTTL=0 so it never re-arms expiry on the persistent lobby
 // stream (the welcome banner relies on that). Never fails the session.
 func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	cfg := roomCfg(addr, lobbyRepo, defaultBranch)
 	cfg.StreamTTL = 0
@@ -151,7 +150,7 @@ func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
 // event fold. The description starts empty; a later `post AGENT_JOINED` refreshes
 // it with role/working_on. Never fails the session.
 func writeLocalHeartbeat(ctx context.Context, addr, repo, branch, agentID string) {
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 	writeHeartbeat(ctx, local, agentID, "")
@@ -198,7 +197,7 @@ func sessionEnd(c *cobra.Command) error {
 	repo, branch := resolveRoom(in.CWD)
 	ask, entries := transcriptSummary(in.TranscriptPath)
 
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
