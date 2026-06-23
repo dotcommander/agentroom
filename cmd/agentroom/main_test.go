@@ -9,7 +9,7 @@ func TestRootCmdHasSubcommands(t *testing.T) {
 	for _, c := range root.Commands() {
 		got[c.Name()] = true
 	}
-	for _, name := range []string{"tail", "post", "catalog", "register", "open", "claim", "done", "hook", "welcome"} {
+	for _, name := range []string{"tail", "post", "catalog", "register", "open", "claim", "done", "leave", "hook", "welcome"} {
 		if !got[name] {
 			t.Errorf("missing subcommand %q", name)
 		}

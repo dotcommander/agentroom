@@ -78,7 +78,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().String("addr", envOr("REDIS_ADDR", "localhost:6379"), "Redis address")
 	root.PersistentFlags().String("repo", defaultRepo(), "repo id (room namespace)")
 	root.PersistentFlags().String("branch", envOr("BRANCH_NAME", "main"), "branch name (room namespace)")
-	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), hookCmd(), welcomeCmd())
+	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), leaveCmd(), hookCmd(), welcomeCmd())
 	return root
 }
 
@@ -275,6 +275,26 @@ func doneCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("agent", defaultAgent(), "agent id completing the task")
+	return cmd
+}
+
+func leaveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "leave",
+		Short: "Clear this agent's presence (announce you're gone now)",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			room, rdb := roomFromFlags(c)
+			defer func() { _ = rdb.Close() }()
+			agent, _ := c.Flags().GetString("agent")
+			if err := room.ClearPresence(c.Context(), agent); err != nil {
+				return err
+			}
+			outf("cleared presence for %s\n", agent)
+			return nil
+		},
+	}
+	cmd.Flags().String("agent", defaultAgent(), "agent id to clear presence for")
 	return cmd
 }
 
