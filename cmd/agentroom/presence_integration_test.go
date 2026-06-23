@@ -23,13 +23,16 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test: requires miniredis, exercises full CLI lifecycle")
 	}
-	defer goleak.VerifyNone(t)
+	// Registered FIRST so LIFO cleanup runs it LAST — after mr.Close() (and the
+	// client/seam teardowns below) have run, so miniredis's servePeer goroutine
+	// is gone before goleak inspects. Deterministic; no ignore-rules.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
 	}
-	defer mr.Close()
+	t.Cleanup(mr.Close)
 
 	// Override the client seam so every CLI command + hook targets the one shared
 	// miniredis. Restore the production factory afterward.
@@ -37,7 +40,7 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	newRedisClient = func(string) *redis.Client {
 		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	}
-	defer func() { newRedisClient = orig }()
+	t.Cleanup(func() { newRedisClient = orig })
 
 	ctx := context.Background()
 	const agent = "agent-int"
@@ -51,7 +54,7 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 
 	// A direct Room view over the same miniredis to assert presence state.
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer func() { _ = rdb.Close() }()
+	t.Cleanup(func() { _ = rdb.Close() })
 	cfg := roomCfg(mr.Addr(), defaultRepo(), "main")
 	room := agentroom.NewRoom(rdb, cfg)
 
