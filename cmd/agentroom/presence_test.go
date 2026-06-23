@@ -11,6 +11,7 @@ func TestPresenceLinesShape(t *testing.T) {
 		name   string
 		pres   map[string]string
 		selfID string
+		claims int // stub OutstandingClaims value fed to the render-time counter
 		want   []string
 	}{
 		{
@@ -50,15 +51,17 @@ func TestPresenceLinesShape(t *testing.T) {
 			want:   []string{"  amy", "  zoe"},
 		},
 		{
-			name:   "json value with claims renders capacity suffix",
-			pres:   map[string]string{"alice": `{"desc":"builder: refactor auth","claims":2}`},
+			name:   "render-time claims add capacity suffix",
+			pres:   map[string]string{"alice": "builder: refactor auth"},
 			selfID: "",
-			want:   []string{"  alice -- builder: refactor auth"},
+			claims: 2,
+			want:   []string{"  alice -- builder: refactor auth (2 claimed)"},
 		},
 		{
-			name:   "json value zero claims omits suffix",
-			pres:   map[string]string{"alice": `{"desc":"builder: refactor auth","claims":0}`},
+			name:   "zero render-time claims omits suffix",
+			pres:   map[string]string{"alice": "builder: refactor auth"},
 			selfID: "",
+			claims: 0,
 			want:   []string{"  alice -- builder: refactor auth"},
 		},
 		{
@@ -68,17 +71,18 @@ func TestPresenceLinesShape(t *testing.T) {
 			want:   []string{"  bob -- role: y"},
 		},
 		{
-			name:   "json value empty desc with claims renders id and suffix",
-			pres:   map[string]string{"carol": `{"desc":"","claims":3}`},
+			name:   "empty desc with render-time claims renders id and suffix",
+			pres:   map[string]string{"carol": ""},
 			selfID: "",
-			want:   []string{"  carol"},
+			claims: 3,
+			want:   []string{"  carol (3 claimed)"},
 		},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := presenceLines(tt.pres, tt.selfID, func(string) int { return 0 })
+			got := presenceLines(tt.pres, tt.selfID, func(string) int { return tt.claims })
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("presenceLines(%v, %q) = %v, want %v", tt.pres, tt.selfID, got, tt.want)
 			}
