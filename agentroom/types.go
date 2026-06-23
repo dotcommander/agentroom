@@ -46,7 +46,7 @@ func DefaultConfig() Config {
 		StreamTTL:        48 * time.Hour,
 		ArchiveThreshold: 10000,
 		Group:            defaultGroup,
-		PresenceTTL:      90 * time.Second,
+		PresenceTTL:      15 * time.Minute,
 		CursorTTL:        24 * time.Hour,
 	}
 }

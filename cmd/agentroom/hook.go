@@ -335,6 +335,7 @@ func userPromptSubmit(c *cobra.Command) error {
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+	writeHeartbeat(ctx, room, shortSession(in.SessionID), "")
 
 	cursor, err := room.ReadCursor(ctx, in.SessionID)
 	if err != nil {
