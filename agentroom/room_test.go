@@ -109,3 +109,59 @@ func TestRecentReturnsChronological(t *testing.T) {
 		t.Errorf("order = [%s..%s], want A..C (chronological)", events[0].Type, events[2].Type)
 	}
 }
+
+func TestPresenceHeartbeatExpiry(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+	const ttl = 60 * time.Second
+
+	if err := room.Heartbeat(ctx, "agentA", "builder: refactor auth", ttl); err != nil {
+		t.Fatalf("heartbeat agentA: %v", err)
+	}
+	if err := room.Heartbeat(ctx, "agentB", "", ttl); err != nil {
+		t.Fatalf("heartbeat agentB: %v", err)
+	}
+
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	if len(pres) != 2 {
+		t.Fatalf("presence size = %d, want 2", len(pres))
+	}
+	if pres["agentA"] != "builder: refactor auth" {
+		t.Errorf("agentA desc = %q, want %q", pres["agentA"], "builder: refactor auth")
+	}
+	if _, ok := pres["agentB"]; !ok {
+		t.Error("agentB missing from presence")
+	}
+
+	// Crash simulation: no SESSION_ENDED, just let the TTL lapse.
+	mr.FastForward(ttl + time.Second)
+	pres, err = room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence after expiry: %v", err)
+	}
+	if len(pres) != 0 {
+		t.Fatalf("presence after expiry = %d, want 0 (both keys should have expired)", len(pres))
+	}
+
+	// Clean-exit path: re-join then ClearPresence removes the key immediately.
+	if err := room.Heartbeat(ctx, "agentA", "builder", ttl); err != nil {
+		t.Fatalf("re-heartbeat agentA: %v", err)
+	}
+	if err := room.ClearPresence(ctx, "agentA"); err != nil {
+		t.Fatalf("clear presence agentA: %v", err)
+	}
+	pres, err = room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence after clear: %v", err)
+	}
+	if _, ok := pres["agentA"]; ok {
+		t.Error("agentA still present after ClearPresence")
+	}
+}
