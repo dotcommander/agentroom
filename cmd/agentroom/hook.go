@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dotcommander/agentchat/agentroom"
 	"github.com/spf13/cobra"
@@ -23,16 +24,18 @@ type sessionStartInput struct {
 func hookCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "hook <event>",
-		Short: "Run as a Claude Code hook (events: session-start, session-end)",
+		Short: "Run as a Claude Code hook (events: session-start, user-prompt-submit, session-end)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			switch args[0] {
 			case "session-start":
 				return sessionStart(c)
+			case "user-prompt-submit":
+				return userPromptSubmit(c)
 			case "session-end":
 				return sessionEnd(c)
 			default:
-				return fmt.Errorf("unknown hook event %q (supported: session-start, session-end)", args[0])
+				return fmt.Errorf("unknown hook event %q (supported: session-start, user-prompt-submit, session-end)", args[0])
 			}
 		},
 	}
@@ -48,6 +51,7 @@ func sessionStart(c *cobra.Command) error {
 	selfID := shortSession(in.SessionID)
 	joinLobby(c.Context(), addr, repo, branch, in.SessionID)
 	writeLocalHeartbeat(c.Context(), addr, repo, branch, selfID)
+	seedCursor(c.Context(), addr, repo, branch, in.SessionID)
 	digest := buildDigest(c.Context(), addr, repo, branch, selfID)
 	if digest == "" {
 		return nil
@@ -295,4 +299,92 @@ func clip(s string, n int) string {
 		return string(r[:n]) + "..."
 	}
 	return s
+}
+
+const (
+	hookReadTimeout = 2 * time.Second
+	maxDeltaEvents  = 20
+)
+
+// seedCursor sets this session's read cursor to the current stream tail so the
+// first UserPromptSubmit delta covers only events published after sign-in, never
+// the full backlog. Best-effort: never fails the session.
+func seedCursor(ctx context.Context, addr, repo, branch, sessionID string) {
+	rdb := newRedisClient(addr)
+	defer func() { _ = rdb.Close() }()
+	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+	last, err := room.LastID(ctx)
+	if err != nil {
+		return
+	}
+	_ = room.WriteCursor(ctx, sessionID, last, room.Config().CursorTTL)
+}
+
+// userPromptSubmit injects room events that landed since this session last spoke,
+// then advances the session's cursor. Nothing new -> no output (zero context
+// cost). NEVER fails the session: any error (redis down, timeout, bad input)
+// yields no output and exit 0.
+func userPromptSubmit(c *cobra.Command) error {
+	addr, _ := c.Flags().GetString("addr")
+	in := readSessionInput()
+	repo, branch := resolveRoom(in.CWD)
+
+	ctx, cancel := context.WithTimeout(c.Context(), hookReadTimeout)
+	defer cancel()
+
+	rdb := newRedisClient(addr)
+	defer func() { _ = rdb.Close() }()
+	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+
+	cursor, err := room.ReadCursor(ctx, in.SessionID)
+	if err != nil {
+		return nil
+	}
+	if cursor == "" {
+		// No cursor yet (session-start seed missed, e.g. redis was down then):
+		// baseline to the tail so we never dump the full backlog.
+		if last, lerr := room.LastID(ctx); lerr == nil {
+			_ = room.WriteCursor(ctx, in.SessionID, last, room.Config().CursorTTL)
+		}
+		return nil
+	}
+	events, err := room.Since(ctx, cursor, maxDeltaEvents)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	_ = room.WriteCursor(ctx, in.SessionID, events[len(events)-1].ID, room.Config().CursorTTL)
+
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     "UserPromptSubmit",
+			"additionalContext": deltaDigest(repo, branch, events),
+		},
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	outln(string(data))
+	return nil
+}
+
+// deltaDigest renders new room events as a compact context block: one line per
+// event (type, agent, clipped payload).
+func deltaDigest(repo, branch string, events []agentroom.Event) string {
+	lines := []string{
+		fmt.Sprintf("agentroom -- %d new event(s) in %s:%s since your last message:", len(events), repo, branch),
+	}
+	for _, ev := range events {
+		agent := ev.AgentID
+		if agent == "" {
+			agent = "?"
+		}
+		line := fmt.Sprintf("  %s  %s", ev.Type, agent)
+		if p := clip(string(ev.Payload), 120); p != "" && p != "null" {
+			line += "  " + p
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "", "(`agentroom tail` for the full feed)")
+	return strings.Join(lines, "\n")
 }
