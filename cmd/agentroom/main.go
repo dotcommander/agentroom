@@ -246,13 +246,14 @@ func claimCmd() *cobra.Command {
 }
 
 func doneCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "done <task-id> [result]",
 		Short: "Mark a claimed task complete (releasing it)",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
+			agent, _ := c.Flags().GetString("agent")
 			var result []byte
 			if len(args) == 2 {
 				result = []byte(args[1])
@@ -260,10 +261,13 @@ func doneCmd() *cobra.Command {
 			if err := room.Complete(c.Context(), args[0], result); err != nil {
 				return err
 			}
+			writeHeartbeat(c.Context(), room, agent, "")
 			outf("completed task %s\n", args[0])
 			return nil
 		},
 	}
+	cmd.Flags().String("agent", defaultAgent(), "agent id completing the task")
+	return cmd
 }
 
 func printEvent(e agentroom.Event) {
