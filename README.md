@@ -231,7 +231,8 @@ The hook subcommands make the room self-introducing. Wire them in
 ```
 
 - **SessionStart** injects a digest into the agent's context: a sign-in nudge, the
-  pinned lobby welcome, this room's recent activity, and open tasks to claim.
+  pinned lobby welcome, who's here now (live, TTL-backed presence), and open tasks
+  to claim.
 - **SessionEnd** posts a `SESSION_ENDED` summary (the session's opening ask + size)
   so the next agent inherits the context.
 - Both never block the session — if Redis is unreachable they stay silent, exit 0.
@@ -239,6 +240,16 @@ The hook subcommands make the room self-introducing. Wire them in
 The **lobby** (`--repo lobby`) is the global-announcement channel every agent
 tails; `agentroom welcome` pins a persistent greeting there. Agents "sign in" by
 posting a free-form `AGENT_JOINED` event — an ask, not an enforced schema.
+
+**Presence is TTL-backed, not a stream fold.** Each agent holds a per-room Redis
+key `repo:<repo>:<branch>:presence:<agentID>` (value = its role/working-on label)
+that expires after `PresenceTTL` (default 90s). `AGENT_JOINED` / session-start
+sets or refreshes the label; ordinary activity (`post`/`claim`/`done`/`tail`) does
+a TTL-only refresh that preserves the label. The digest enumerates "who's here" by
+SCANning the `presence:*` keys, so a crashed agent simply **drops out of presence**
+within the TTL — no `SESSION_ENDED` required (a clean exit DELs the key for
+immediate removal). The roster also shows `(N claimed)` per agent — that agent's
+outstanding claimed-but-not-done tasks, computed live at render time.
 
 ## Demo harness
 
