@@ -3,6 +3,7 @@ package agentroom
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -86,4 +87,49 @@ func (r *Room) Recent(ctx context.Context, count int64) ([]Event, error) {
 		events[len(msgs)-1-i] = decodeEvent(msg)
 	}
 	return events, nil
+}
+
+// Heartbeat writes (or refreshes) this agent's live-presence record: a TTL key
+// holding desc (role / working_on). It is called on join and on every CLI
+// invocation, so the key auto-expires ttl after the agent's last activity — a
+// crashed agent drops from presence with no SESSION_ENDED needed.
+func (r *Room) Heartbeat(ctx context.Context, agentID, desc string, ttl time.Duration) error {
+	if err := r.rdb.Set(ctx, r.cfg.PresenceKey(agentID), desc, ttl).Err(); err != nil {
+		return fmt.Errorf("agentroom: heartbeat %s: %w", agentID, err)
+	}
+	return nil
+}
+
+// ClearPresence deletes this agent's presence record for a clean fast exit
+// (called on SESSION_ENDED). Absence of the key is not an error.
+func (r *Room) ClearPresence(ctx context.Context, agentID string) error {
+	if err := r.rdb.Del(ctx, r.cfg.PresenceKey(agentID)).Err(); err != nil {
+		return fmt.Errorf("agentroom: clear presence %s: %w", agentID, err)
+	}
+	return nil
+}
+
+// Presence returns the live presence set as agentID -> description, by SCANning
+// the room's presence prefix (cursor-based, non-blocking — never KEYS) and
+// reading each key. Expired keys are simply absent. This is the liveness-backed
+// replacement for folding AGENT_JOINED/SESSION_ENDED off the event stream.
+func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
+	prefix := r.cfg.PresencePrefix()
+	out := make(map[string]string)
+	iter := r.rdb.Scan(ctx, 0, prefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := iter.Val()
+		desc, err := r.rdb.Get(ctx, key).Result()
+		if err != nil {
+			continue // key expired between SCAN and GET — treat as not present
+		}
+		out[strings.TrimPrefix(key, prefix)] = desc
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("agentroom: scan presence: %w", err)
+	}
+	return out, nil
 }
