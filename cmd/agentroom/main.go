@@ -104,10 +104,13 @@ func tailCmd() *cobra.Command {
 			for _, e := range events {
 				printEvent(e)
 			}
+			agent, _ := c.Flags().GetString("agent")
+			writeHeartbeat(c.Context(), room, agent, "")
 			return nil
 		},
 	}
 	cmd.Flags().Int64("count", 20, "number of recent events to show")
+	cmd.Flags().String("agent", defaultAgent(), "agent id to attribute presence to")
 	return cmd
 }
 
