@@ -49,6 +49,30 @@ func TestPresenceLinesShape(t *testing.T) {
 			selfID: "",
 			want:   []string{"  amy", "  zoe"},
 		},
+		{
+			name:   "json value with claims renders capacity suffix",
+			pres:   map[string]string{"alice": `{"desc":"builder: refactor auth","claims":2}`},
+			selfID: "",
+			want:   []string{"  alice -- builder: refactor auth (2 claimed)"},
+		},
+		{
+			name:   "json value zero claims omits suffix",
+			pres:   map[string]string{"alice": `{"desc":"builder: refactor auth","claims":0}`},
+			selfID: "",
+			want:   []string{"  alice -- builder: refactor auth"},
+		},
+		{
+			name:   "legacy flat string degrades to desc-only",
+			pres:   map[string]string{"bob": "role: y"},
+			selfID: "",
+			want:   []string{"  bob -- role: y"},
+		},
+		{
+			name:   "json value empty desc with claims renders id and suffix",
+			pres:   map[string]string{"carol": `{"desc":"","claims":3}`},
+			selfID: "",
+			want:   []string{"  carol (3 claimed)"},
+		},
 	}
 	for _, tt := range tests {
 		tt := tt
