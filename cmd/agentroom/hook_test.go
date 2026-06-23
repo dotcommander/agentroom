@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/dotcommander/agentchat/agentroom"
+)
 
 func TestExtractText(t *testing.T) {
 	t.Parallel()
@@ -22,5 +27,26 @@ func TestClip(t *testing.T) {
 	}
 	if got := clip("abcdefghij", 5); got != "abcde..." {
 		t.Errorf("clip long = %q, want abcde...", got)
+	}
+}
+
+func TestDeltaDigest(t *testing.T) {
+	t.Parallel()
+	events := []agentroom.Event{
+		{Type: "TESTS_FAILED", AgentID: "ci-1", Payload: []byte(`{"pkg":"auth"}`)},
+		{Type: "AGENT_JOINED", AgentID: ""},
+	}
+	got := deltaDigest("auth", "main", events)
+	if !strings.Contains(got, "2 new event(s) in auth:main") {
+		t.Errorf("missing header: %q", got)
+	}
+	if !strings.Contains(got, "TESTS_FAILED  ci-1") {
+		t.Errorf("missing event line: %q", got)
+	}
+	if !strings.Contains(got, `{"pkg":"auth"}`) {
+		t.Errorf("missing payload: %q", got)
+	}
+	if !strings.Contains(got, "AGENT_JOINED  ?") {
+		t.Errorf("missing empty-agent fallback: %q", got)
 	}
 }
