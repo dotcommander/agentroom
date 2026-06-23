@@ -113,3 +113,53 @@ func TestClearPresenceRemovesAgent(t *testing.T) {
 		t.Fatalf("agent-1 should be cleared: %v", live)
 	}
 }
+
+func TestRefreshPresencePreservesDesc(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+	key := room.cfg.PresenceKey("a1")
+	if err := room.Heartbeat(ctx, "a1", "role=x", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	mr.FastForward(30 * time.Second)
+	if err := room.RefreshPresence(ctx, "a1", time.Minute); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	got, err := mr.Get(key)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got != "role=x" {
+		t.Fatalf("desc after refresh = %q, want %q", got, "role=x")
+	}
+	if ttl := mr.TTL(key); ttl <= 30*time.Second {
+		t.Fatalf("ttl after refresh = %v, want > 30s", ttl)
+	}
+}
+
+func TestRefreshPresenceCreatesEmptyWhenAbsent(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	if err := room.RefreshPresence(ctx, "ghost", time.Minute); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	live, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	desc, ok := live["ghost"]
+	if !ok {
+		t.Fatalf("ghost not registered: %v", live)
+	}
+	if desc != "" {
+		t.Fatalf("ghost desc = %q, want empty", desc)
+	}
+}

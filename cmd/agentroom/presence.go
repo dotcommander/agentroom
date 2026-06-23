@@ -102,13 +102,11 @@ func writeHeartbeat(ctx context.Context, room *agentroom.Room, agentID, desc str
 	if agentID == "" {
 		return
 	}
-	// Snapshot the self-derived load signal at write time; staleness is bounded
-	// by the presence TTL, keeping the digest read path a single SCAN. A count
-	// error degrades to 0 — presence must never block a command.
-	claims, _ := room.OutstandingClaims(ctx, agentID)
-	val, err := json.Marshal(presenceValue{Desc: desc, Claims: claims})
-	if err != nil {
+	// Empty desc means "just refresh liveness" (claim/tail/non-JOINED post):
+	// refresh the TTL without overwriting a role label set at sign-in.
+	if desc == "" {
+		_ = room.RefreshPresence(ctx, agentID, room.Config().PresenceTTL)
 		return
 	}
-	_ = room.Heartbeat(ctx, agentID, string(val), room.Config().PresenceTTL)
+	_ = room.Heartbeat(ctx, agentID, desc, room.Config().PresenceTTL)
 }

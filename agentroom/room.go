@@ -100,6 +100,26 @@ func (r *Room) Heartbeat(ctx context.Context, agentID, desc string, ttl time.Dur
 	return nil
 }
 
+// refreshPresenceScript refreshes a presence key's TTL without disturbing its
+// description; if the key is absent it creates a label-less record. This keeps
+// non-join activity (claim/tail/non-JOINED post) from clobbering a role label
+// set at sign-in while still registering liveness.
+var refreshPresenceScript = redis.NewScript(`
+if redis.call('pexpire', KEYS[1], ARGV[1]) == 0 then
+	redis.call('set', KEYS[1], '', 'PX', ARGV[1])
+end
+return 1
+`)
+
+// RefreshPresence extends agentID's presence TTL, preserving any existing
+// description, and creates an empty record if none exists.
+func (r *Room) RefreshPresence(ctx context.Context, agentID string, ttl time.Duration) error {
+	if err := refreshPresenceScript.Run(ctx, r.rdb, []string{r.cfg.PresenceKey(agentID)}, ttl.Milliseconds()).Err(); err != nil {
+		return fmt.Errorf("agentroom: refresh presence %s: %w", agentID, err)
+	}
+	return nil
+}
+
 // ClearPresence deletes this agent's presence record for a clean fast exit
 // (called on SESSION_ENDED). Absence of the key is not an error.
 func (r *Room) ClearPresence(ctx context.Context, agentID string) error {

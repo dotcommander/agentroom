@@ -141,7 +141,7 @@ func postCmd() *cobra.Command {
 			}
 			// Opportunistic heartbeat: every CLI call refreshes the agent's
 			// presence TTL key — this is the heartbeat in a daemonless CLI.
-			writeHeartbeat(c.Context(), room, agent, "")
+			writeHeartbeat(c.Context(), room, agent, joinDesc(payload))
 			outf("posted %s as %s (entry %s)\n", ev.Type, agent, ev.ID)
 			return nil
 		},
