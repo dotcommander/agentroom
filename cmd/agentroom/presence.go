@@ -9,6 +9,31 @@ import (
 	"github.com/dotcommander/agentchat/agentroom"
 )
 
+// presenceValue is the JSON shape stored in an agent's presence key: a free-form
+// description plus a self-derived load snapshot (claims = outstanding claimed-but-
+// -not-done tasks, taken at write time). The struct intentionally leaves room for
+// an optional harness-supplied status field later without another format change.
+type presenceValue struct {
+	Desc   string `json:"desc"`
+	Claims int    `json:"claims"`
+}
+
+// decodePresence parses a stored presence value tolerantly: a JSON object yields
+// its fields; a legacy flat description string (pre-JSON keys, or any non-JSON
+// bytes) degrades to desc-only with zero claims. Never errors — presence
+// rendering must not break on an old or malformed value.
+func decodePresence(raw string) presenceValue {
+	if raw == "" {
+		return presenceValue{}
+	}
+	var v presenceValue
+	if err := json.Unmarshal([]byte(raw), &v); err == nil {
+		return v
+	}
+	// Not JSON -> treat the whole raw string as a legacy description.
+	return presenceValue{Desc: raw}
+}
+
 // presenceLines renders the live presence set (agentID -> description, from the
 // room's TTL presence keys) into the "== who's here ==" block. selfID is the
 // calling session's own agent id and is omitted (you are not "someone else
@@ -25,16 +50,28 @@ func presenceLines(pres map[string]string, selfID string) []string {
 	sort.Strings(ids)
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if desc := pres[id]; desc != "" {
-			lines = append(lines, fmt.Sprintf("  %s -- %s", id, desc))
-		} else {
-			lines = append(lines, "  "+id)
-		}
+		v := decodePresence(pres[id])
+		lines = append(lines, presenceLine(id, v))
 	}
 	if len(lines) == 0 {
 		return []string{"(nobody else here)"}
 	}
 	return lines
+}
+
+// presenceLine renders one roster entry: "  <id>", "  <id> -- <desc>", and a
+// trailing " (<N> claimed)" capacity hint when the agent holds outstanding
+// claims. The suffix is omitted when N == 0 (or unknown), preserving the
+// desc-only and id-only shapes for agents with no current load.
+func presenceLine(id string, v presenceValue) string {
+	line := "  " + id
+	if v.Desc != "" {
+		line += " -- " + v.Desc
+	}
+	if v.Claims > 0 {
+		line += fmt.Sprintf(" (%d claimed)", v.Claims)
+	}
+	return line
 }
 
 // joinDesc renders an AGENT_JOINED payload as "role: working_on" (either may be
@@ -65,5 +102,13 @@ func writeHeartbeat(ctx context.Context, room *agentroom.Room, agentID, desc str
 	if agentID == "" {
 		return
 	}
-	_ = room.Heartbeat(ctx, agentID, desc, room.Config().PresenceTTL)
+	// Snapshot the self-derived load signal at write time; staleness is bounded
+	// by the presence TTL, keeping the digest read path a single SCAN. A count
+	// error degrades to 0 — presence must never block a command.
+	claims, _ := room.OutstandingClaims(ctx, agentID)
+	val, err := json.Marshal(presenceValue{Desc: desc, Claims: claims})
+	if err != nil {
+		return
+	}
+	_ = room.Heartbeat(ctx, agentID, string(val), room.Config().PresenceTTL)
 }
