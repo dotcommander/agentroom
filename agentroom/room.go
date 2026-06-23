@@ -2,6 +2,7 @@ package agentroom
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -87,6 +88,67 @@ func (r *Room) Recent(ctx context.Context, count int64) ([]Event, error) {
 		events[len(msgs)-1-i] = decodeEvent(msg)
 	}
 	return events, nil
+}
+
+// Since returns up to count events with stream IDs strictly after lastID, in
+// chronological order — the delta counterpart to Recent ("what landed since I
+// last looked"). An empty lastID returns no events (the caller has no cursor
+// yet). XRANGE treats lastID inclusively, so the matching entry is skipped.
+func (r *Room) Since(ctx context.Context, lastID string, count int64) ([]Event, error) {
+	if lastID == "" {
+		return nil, nil
+	}
+	msgs, err := r.rdb.XRangeN(ctx, r.cfg.StreamKey(), lastID, "+", count+1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("agentroom: since %s: %w", lastID, err)
+	}
+	events := make([]Event, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.ID == lastID {
+			continue
+		}
+		events = append(events, decodeEvent(msg))
+	}
+	if int64(len(events)) > count {
+		events = events[:count]
+	}
+	return events, nil
+}
+
+// LastID returns the stream's most recent entry ID, or "0-0" when the stream is
+// empty. It seeds a session's read cursor so the first delta read covers only
+// events published after the cursor was set (never the full history).
+func (r *Room) LastID(ctx context.Context) (string, error) {
+	msgs, err := r.rdb.XRevRangeN(ctx, r.cfg.StreamKey(), "+", "-", 1).Result()
+	if err != nil {
+		return "", fmt.Errorf("agentroom: last id: %w", err)
+	}
+	if len(msgs) == 0 {
+		return "0-0", nil
+	}
+	return msgs[0].ID, nil
+}
+
+// ReadCursor returns the last stream entry ID session sessionID has seen, or ""
+// when no cursor exists yet (treat as "baseline from the stream tail").
+func (r *Room) ReadCursor(ctx context.Context, sessionID string) (string, error) {
+	id, err := r.rdb.Get(ctx, r.cfg.CursorKey(sessionID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("agentroom: read cursor %s: %w", sessionID, err)
+	}
+	return id, nil
+}
+
+// WriteCursor stores the last stream entry ID seen by session sessionID with a
+// TTL, so a dead session's cursor self-evicts.
+func (r *Room) WriteCursor(ctx context.Context, sessionID, id string, ttl time.Duration) error {
+	if err := r.rdb.Set(ctx, r.cfg.CursorKey(sessionID), id, ttl).Err(); err != nil {
+		return fmt.Errorf("agentroom: write cursor %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // Heartbeat writes (or refreshes) this agent's live-presence record: a TTL key

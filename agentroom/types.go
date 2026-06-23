@@ -31,6 +31,7 @@ type Config struct {
 	ArchiveThreshold int64         // stream length that triggers compaction
 	Group            string        // consumer-group name for Runtime delivery
 	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
+	CursorTTL        time.Duration // per-session read-cursor key auto-expires this long after the last refresh; a lost/expired cursor simply re-baselines to the stream tail
 }
 
 // defaultGroup is the fallback consumer-group name used when Config.Group is
@@ -46,6 +47,7 @@ func DefaultConfig() Config {
 		ArchiveThreshold: 10000,
 		Group:            defaultGroup,
 		PresenceTTL:      90 * time.Second,
+		CursorTTL:        24 * time.Hour,
 	}
 }
 
@@ -70,6 +72,14 @@ func (c Config) PresencePrefix() string {
 // PresenceTTL after the last activity, so a crashed agent drops automatically.
 func (c Config) PresenceKey(agentID string) string {
 	return c.PresencePrefix() + agentID
+}
+
+// CursorKey is the per-session TTL key holding the last stream entry ID a
+// session has already seen. The UserPromptSubmit hook reads events after this ID
+// and advances it, so each prompt injects only the delta. It expires CursorTTL
+// after the last refresh, so a dead session's cursor self-evicts.
+func (c Config) CursorKey(sessionID string) string {
+	return "repo:" + c.RepoID + ":" + c.BranchName + ":cursor:" + sessionID
 }
 
 // CatalogKey is the Redis hash holding this room's self-describing task catalog
