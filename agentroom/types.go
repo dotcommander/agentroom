@@ -30,6 +30,7 @@ type Config struct {
 	StreamTTL        time.Duration // stream auto-expires this long after the last publish
 	ArchiveThreshold int64         // stream length that triggers compaction
 	Group            string        // consumer-group name for Runtime delivery
+	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
 }
 
 // defaultGroup is the fallback consumer-group name used when Config.Group is
@@ -44,6 +45,7 @@ func DefaultConfig() Config {
 		StreamTTL:        48 * time.Hour,
 		ArchiveThreshold: 10000,
 		Group:            defaultGroup,
+		PresenceTTL:      90 * time.Second,
 	}
 }
 
@@ -55,6 +57,19 @@ func (c Config) StreamKey() string {
 // ScratchpadPrefix is the key prefix for this room's transient KV scratchpad.
 func (c Config) ScratchpadPrefix() string {
 	return "repo:" + c.RepoID + ":" + c.BranchName + ":state:"
+}
+
+// PresencePrefix is the key prefix for this room's live per-agent presence
+// records. SCAN this prefix to enumerate agents active within PresenceTTL.
+func (c Config) PresencePrefix() string {
+	return "repo:" + c.RepoID + ":" + c.BranchName + ":presence:"
+}
+
+// PresenceKey is the TTL key holding one agent's presence description (role /
+// working_on). Written on join and refreshed on each CLI invocation; it expires
+// PresenceTTL after the last activity, so a crashed agent drops automatically.
+func (c Config) PresenceKey(agentID string) string {
+	return c.PresencePrefix() + agentID
 }
 
 // CatalogKey is the Redis hash holding this room's self-describing task catalog
