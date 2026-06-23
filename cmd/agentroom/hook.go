@@ -47,6 +47,9 @@ func hookCmd() *cobra.Command {
 func sessionStart(c *cobra.Command) error {
 	addr, _ := c.Flags().GetString("addr")
 	in := readSessionInput()
+	if in.SessionID == "" {
+		return nil
+	}
 	repo, branch := resolveRoom(in.CWD)
 	selfID := shortSession(in.SessionID)
 	joinLobby(c.Context(), addr, repo, branch, in.SessionID)
@@ -198,6 +201,9 @@ func sessionEnd(c *cobra.Command) error {
 	if in.CWD == "" {
 		in.CWD, _ = os.Getwd()
 	}
+	if in.SessionID == "" {
+		return nil
+	}
 	repo, branch := resolveRoom(in.CWD)
 	ask, entries := transcriptSummary(in.TranscriptPath)
 
@@ -328,6 +334,9 @@ func userPromptSubmit(c *cobra.Command) error {
 	addr, _ := c.Flags().GetString("addr")
 	in := readSessionInput()
 	repo, branch := resolveRoom(in.CWD)
+	if in.SessionID == "" {
+		return nil
+	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), hookReadTimeout)
 	defer cancel()
