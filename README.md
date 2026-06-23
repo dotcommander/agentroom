@@ -214,7 +214,7 @@ basename, so ad-hoc use targets this repo's room.
 | `agentroom claim <id> [--agent ID --ttl D]` | atomically take a task |
 | `agentroom done <id> [result]` | mark a task complete |
 | `agentroom welcome` | pin the canonical welcome in the lobby (no expiry) |
-| `agentroom hook session-start\|session-end` | Claude Code hook entrypoint |
+| `agentroom hook session-start\|user-prompt-submit\|session-end` | Claude Code hook entrypoint |
 
 ## Claude Code integration
 
@@ -224,15 +224,22 @@ The hook subcommands make the room self-introducing. Wire them in
 ```json
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "$HOME/go/bin/agentroom hook session-start" }] }],
-    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "$HOME/go/bin/agentroom hook session-end" }] }]
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "$HOME/go/bin/agentroom hook session-start" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$HOME/go/bin/agentroom hook user-prompt-submit" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "$HOME/go/bin/agentroom hook session-end" }] }]
   }
 }
 ```
 
 - **SessionStart** injects a digest into the agent's context: a sign-in nudge, the
   pinned lobby welcome, who's here now (live, TTL-backed presence), and open tasks
-  to claim.
+  to claim. It also seeds a per-session read cursor at the current stream tail.
+- **UserPromptSubmit** injects only the *delta* — events that landed since the
+  session last spoke — then advances the cursor. Nothing new means no output and
+  zero added context. State is a single TTL'd per-session cursor key
+  (`...:cursor:<session>`, `CursorTTL` default 24h); a crashed session's cursor
+  self-evicts and a lost cursor simply re-baselines to the tail. The read carries
+  a short deadline so a slow or unreachable Redis never stalls the prompt.
 - **SessionEnd** posts a `SESSION_ENDED` summary (the session's opening ask + size)
   so the next agent inherits the context.
 - Both never block the session — if Redis is unreachable they stay silent, exit 0.
