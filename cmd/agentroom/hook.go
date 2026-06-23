@@ -46,8 +46,10 @@ func sessionStart(c *cobra.Command) error {
 	addr, _ := c.Flags().GetString("addr")
 	in := readSessionInput()
 	repo, branch := resolveRoom(in.CWD)
+	selfID := shortSession(in.SessionID)
 	joinLobby(c.Context(), addr, repo, branch, in.SessionID)
-	digest := buildDigest(c.Context(), addr, repo, branch)
+	writeLocalHeartbeat(c.Context(), addr, repo, branch, selfID)
+	digest := buildDigest(c.Context(), addr, repo, branch, selfID)
 	if digest == "" {
 		return nil
 	}
@@ -90,18 +92,18 @@ func resolveRoom(cwd string) (string, string) {
 	return repo, branch
 }
 
-// buildDigest reports who is currently present in the local room (derived from
-// the recent event stream) plus open tasks. Returns "" if redis is unreachable
+// buildDigest reports who is currently present in the local room (live, from TTL
+// presence keys) plus open tasks. Returns "" if redis is unreachable
 // so the session is never blocked. The noisy lobby and raw recent-activity
 // feeds are intentionally omitted — use `agentroom tail` for the full feed.
-func buildDigest(ctx context.Context, addr, repo, branch string) string {
+func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	defer func() { _ = rdb.Close() }()
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
-	// Pull a wide window so the AGENT_JOINED that establishes presence isn't
-	// missed; presence is folded down to the live set below.
-	recent, err := local.Recent(ctx, 100)
+	// Presence is liveness-backed: read the live TTL key set, not a fold of the
+	// event stream. Crashed agents drop within PresenceTTL with no SESSION_ENDED.
+	pres, err := local.Presence(ctx)
 	if err != nil {
 		return ""
 	}
@@ -116,78 +118,11 @@ func buildDigest(ctx context.Context, addr, repo, branch string) string {
 		"",
 		"== who's here ==",
 	}
-	lines = append(lines, presenceLines(recent)...)
+	lines = append(lines, presenceLines(pres, selfID)...)
 	lines = append(lines, "", "== open tasks you could claim ==")
 	lines = append(lines, openLines(open)...)
 	lines = append(lines, "", "How to use: `agentroom tail` to watch the full feed, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
 	return strings.Join(lines, "\n")
-}
-
-// presenceLines derives live presence from the recent event stream (ordered
-// oldest->newest): an agent is "here" when its latest verb is AGENT_JOINED with
-// no later SESSION_ENDED. Without a heartbeat/TTL this is best-effort — an agent
-// that dies without posting SESSION_ENDED lingers until it ages out of the
-// stream window.
-func presenceLines(events []agentroom.Event) []string {
-	type pres struct {
-		desc string
-		on   bool
-	}
-	order := make([]string, 0)
-	seen := map[string]*pres{}
-	for _, e := range events {
-		p := seen[e.AgentID]
-		if p == nil {
-			p = &pres{}
-			seen[e.AgentID] = p
-			order = append(order, e.AgentID)
-		}
-		switch e.Type {
-		case "AGENT_JOINED":
-			p.on = true
-			if d := joinDesc(e.Payload); d != "" {
-				p.desc = d
-			}
-		case "SESSION_ENDED":
-			p.on = false
-		}
-	}
-	lines := make([]string, 0, len(order))
-	for _, id := range order {
-		p := seen[id]
-		if !p.on {
-			continue
-		}
-		if p.desc != "" {
-			lines = append(lines, fmt.Sprintf("  %s -- %s", id, p.desc))
-		} else {
-			lines = append(lines, "  "+id)
-		}
-	}
-	if len(lines) == 0 {
-		return []string{"(nobody else here)"}
-	}
-	return lines
-}
-
-// joinDesc renders an AGENT_JOINED payload as "role: working_on" (either may be
-// absent). Returns "" if neither field is present.
-func joinDesc(p []byte) string {
-	var j struct {
-		Role      string `json:"role"`
-		WorkingOn string `json:"working_on"`
-	}
-	if json.Unmarshal(p, &j) != nil {
-		return ""
-	}
-	switch {
-	case j.Role != "" && j.WorkingOn != "":
-		return clip(j.Role+": "+j.WorkingOn, 160)
-	case j.Role != "":
-		return clip(j.Role, 160)
-	default:
-		return clip(j.WorkingOn, 160)
-	}
 }
 
 // joinLobby posts a best-effort AGENT_JOINED to the global lobby room so every
@@ -209,6 +144,17 @@ func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
 		AgentID: shortSession(sessionID),
 		Payload: payload,
 	})
+}
+
+// writeLocalHeartbeat best-effort registers this session's presence in the local
+// room with a TTL key, so it appears in "who's here" without depending on the
+// event fold. The description starts empty; a later `post AGENT_JOINED` refreshes
+// it with role/working_on. Never fails the session.
+func writeLocalHeartbeat(ctx context.Context, addr, repo, branch, agentID string) {
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer func() { _ = rdb.Close() }()
+	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+	writeHeartbeat(ctx, local, agentID, "")
 }
 
 func openLines(tasks []agentroom.Task) []string {
@@ -269,6 +215,7 @@ func sessionEnd(c *cobra.Command) error {
 		AgentID: shortSession(in.SessionID),
 		Payload: payload,
 	})
+	_ = room.ClearPresence(c.Context(), shortSession(in.SessionID))
 	return nil
 }
 
