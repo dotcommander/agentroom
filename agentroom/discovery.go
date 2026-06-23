@@ -191,8 +191,11 @@ func (r *Room) OutstandingClaims(ctx context.Context, agentID string) (int, erro
 			return 0, err
 		}
 		owner, err := r.rdb.Get(ctx, iter.Val()).Result()
-		if err != nil {
+		if errors.Is(err, redis.Nil) {
 			continue // lease expired between SCAN and GET — not an active claim
+		}
+		if err != nil {
+			return 0, fmt.Errorf("agentroom: read claim %s: %w", iter.Val(), err)
 		}
 		if owner == agentID {
 			count++

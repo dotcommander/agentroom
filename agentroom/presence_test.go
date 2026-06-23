@@ -141,6 +141,28 @@ func TestRefreshPresencePreservesDesc(t *testing.T) {
 	}
 }
 
+func TestPresenceErrorsOnOutage(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+
+	// Seed a presence record.
+	if err := room.Heartbeat(ctx, "agent-1", "role=fixer", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	// Force the next Redis command to error.
+	mr.SetError("forced error")
+
+	_, err := room.Presence(ctx)
+	if err == nil {
+		t.Fatal("Presence() should return error during redis outage, got nil")
+	}
+}
+
 func TestRefreshPresenceCreatesEmptyWhenAbsent(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

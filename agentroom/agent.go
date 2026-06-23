@@ -112,6 +112,10 @@ func (rt *Runtime) handle(ctx context.Context, stream, group string, msg redis.X
 			rt.publishError(ctx, err)
 		}
 	}
+	// Ack is best-effort: a failed XAck leaves the entry PENDING, which
+	// reclaim()/XAutoClaim recovers, so work is never lost — at worst the
+	// idempotent Execute sees a redelivery. Surfacing the error would ripple
+	// into the Listen/reclaim loop for no correctness gain.
 	_ = rt.room.rdb.XAck(ctx, stream, group, msg.ID).Err()
 }
 

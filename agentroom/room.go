@@ -205,8 +205,11 @@ func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
 		}
 		key := iter.Val()
 		desc, err := r.rdb.Get(ctx, key).Result()
+		if errors.Is(err, redis.Nil) {
+			continue // key expired between SCAN and GET — not present
+		}
 		if err != nil {
-			continue // key expired between SCAN and GET — treat as not present
+			return nil, fmt.Errorf("agentroom: read presence %s: %w", key, err)
 		}
 		out[strings.TrimPrefix(key, prefix)] = desc
 	}

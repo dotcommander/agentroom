@@ -135,6 +135,28 @@ func TestOpenTasks(t *testing.T) {
 	}
 }
 
+func TestOutstandingClaimsErrorsOnOutage(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+
+	// Seed a claim.
+	if ok, err := room.Claim(ctx, "outage-task", "agentA", time.Minute); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+
+	// Force the next Redis command to error.
+	mr.SetError("forced error")
+
+	_, err := room.OutstandingClaims(ctx, "agentA")
+	if err == nil {
+		t.Fatal("OutstandingClaims() should return error during redis outage, got nil")
+	}
+}
+
 func TestOutstandingClaims(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
