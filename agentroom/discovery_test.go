@@ -134,3 +134,60 @@ func TestOpenTasks(t *testing.T) {
 		t.Errorf("open task type = %q, want %s", open[0].Type, evFailed)
 	}
 }
+
+func TestOutstandingClaims(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+	const lease = 60 * time.Second
+
+	// agentA claims two tasks; a different agent claims a third.
+	for _, id := range []string{"oc-1", "oc-2"} {
+		ok, err := room.Claim(ctx, id, "agentA", lease)
+		if err != nil {
+			t.Fatalf("claim %s: %v", id, err)
+		}
+		if !ok {
+			t.Fatalf("claim %s not granted", id)
+		}
+	}
+	if ok, err := room.Claim(ctx, "oc-3", "agentB", lease); err != nil || !ok {
+		t.Fatalf("claim oc-3 as agentB: ok=%v err=%v", ok, err)
+	}
+
+	n, err := room.OutstandingClaims(ctx, "agentA")
+	if err != nil {
+		t.Fatalf("outstanding agentA: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("agentA outstanding = %d, want 2", n)
+	}
+	if n, err := room.OutstandingClaims(ctx, "agentB"); err != nil || n != 1 {
+		t.Fatalf("agentB outstanding = %d (err %v), want 1", n, err)
+	}
+
+	// Completing one of agentA's tasks releases its owner lease → count drops.
+	if err := room.Complete(ctx, "oc-1", nil); err != nil {
+		t.Fatalf("complete oc-1: %v", err)
+	}
+	n, err = room.OutstandingClaims(ctx, "agentA")
+	if err != nil {
+		t.Fatalf("outstanding after complete: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("agentA outstanding after complete = %d, want 1", n)
+	}
+
+	// Crash simulation: let the remaining lease expire (no Complete) → count → 0.
+	mr.FastForward(lease + time.Second)
+	n, err = room.OutstandingClaims(ctx, "agentA")
+	if err != nil {
+		t.Fatalf("outstanding after expiry: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("agentA outstanding after lease expiry = %d, want 0", n)
+	}
+}
