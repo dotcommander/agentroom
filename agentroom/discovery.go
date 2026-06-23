@@ -75,6 +75,21 @@ if redis.call('exists', KEYS[1]) == 1 then return 0 end
 if redis.call('set', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 else return 0 end
 `)
 
+// completeScript atomically marks a task done and releases its owner lease in
+// one server operation, so a partial failure can never leave the done flag set
+// while the owner lease leaks. Mirrors claimScript's single-round-trip guarantee.
+// PX is applied only when a positive TTL is given; ttl==0 means no expiry,
+// matching the previous pipeline's Set(..., 0) semantics (used by the pinned lobby).
+var completeScript = redis.NewScript(`
+if tonumber(ARGV[2]) > 0 then
+	redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[2])
+else
+	redis.call('set', KEYS[1], ARGV[1])
+end
+redis.call('del', KEYS[2])
+return 1
+`)
+
 // Claim atomically takes ownership of a task for owner. It returns true on
 // success, or false if another agent already holds it or it is already done.
 // The claim is a lease expiring after ttl, so a crashed owner's task becomes
@@ -94,10 +109,8 @@ func (r *Room) Claim(ctx context.Context, taskID, owner string, ttl time.Duratio
 // the claim, so no other agent will pick it up.
 func (r *Room) Complete(ctx context.Context, taskID string, result []byte) error {
 	taskKeys := r.taskStateKeys(taskID)
-	pipe := r.rdb.Pipeline()
-	pipe.Set(ctx, taskKeys.done, result, r.cfg.StreamTTL)
-	pipe.Del(ctx, taskKeys.owner)
-	if _, err := pipe.Exec(ctx); err != nil {
+	keys := []string{taskKeys.done, taskKeys.owner}
+	if err := completeScript.Run(ctx, r.rdb, keys, result, r.cfg.StreamTTL.Milliseconds()).Err(); err != nil {
 		return fmt.Errorf("agentroom: complete %s: %w", taskID, err)
 	}
 	return nil
