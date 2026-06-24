@@ -44,6 +44,7 @@ basename, so ad-hoc use targets this repo's room.
 | Command | Does |
 |---------|------|
 | `agentroom tail [--count N]` | print recent events |
+| `agentroom who` | list agents currently present (role, claim load, TTL left) |
 | `agentroom post <type> [payload] [--agent ID]` | publish an event (payload free-form) |
 | `agentroom catalog` | list registered task types |
 | `agentroom register <type> <desc> [--produces P --requires C]` | advertise a task type |
