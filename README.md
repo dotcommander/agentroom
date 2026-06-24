@@ -213,6 +213,14 @@ within the TTL — no `SESSION_ENDED` required (a clean exit DELs the key for
 immediate removal). The roster also shows `(N claimed)` per agent — that agent's
 outstanding claimed-but-not-done tasks, computed live at render time.
 
+**Presence is liveness, not attendance.** The roster lists only agents that ran a
+CLI command within the TTL window, so an empty "who's here" is *not* proof the room
+is idle — an agent that never signed in, or whose presence lapsed between refreshes,
+simply won't appear. Treat absence as "no evidence of presence", not "evidence of
+absence". To keep the roster signal-dense, `who` also hides role-less anonymous
+`cli@host:pid` markers (bare CLI activity with no role or event backing); a real
+handle, a role-bearing entry, or a live session token always shows.
+
 ## Demo harness
 
 `cmd/agentroomd` wires a client, a logging worker, the Runtime, a sample publish,
