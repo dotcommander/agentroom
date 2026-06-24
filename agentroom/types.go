@@ -13,11 +13,13 @@ const EventEngineRuntimeError = "ENGINE_RUNTIME_ERROR"
 
 // Event is an immutable, timestamped marker in a repo/branch stream.
 type Event struct {
-	ID        string          `json:"id"`        // stream-assigned entry ID
-	Type      string          `json:"type"`      // e.g. "AST_PARSED", "TESTS_FAILED"
-	AgentID   string          `json:"agent_id"`  // initiating engine
-	Payload   json.RawMessage `json:"payload"`   // small metadata or scratchpad refs
-	Timestamp int64           `json:"timestamp"` // unix-nano
+	ID        string          `json:"id"`                 // stream-assigned entry ID
+	Type      string          `json:"type"`               // e.g. "AST_PARSED", "TESTS_FAILED"
+	AgentID   string          `json:"agent_id"`           // initiating engine
+	To        string          `json:"to,omitempty"`       // directed recipient agent id ("" = broadcast)
+	ReplyTo   string          `json:"reply_to,omitempty"` // stream id this threads under ("" = top-level)
+	Payload   json.RawMessage `json:"payload"`            // small metadata or scratchpad refs
+	Timestamp int64           `json:"timestamp"`          // unix-nano
 }
 
 // Config isolates one room to a repo + branch namespace and carries the mesh

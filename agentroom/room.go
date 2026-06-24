@@ -42,6 +42,8 @@ func (r *Room) Publish(ctx context.Context, ev *Event) error {
 		Values: map[string]any{
 			"type":      ev.Type,
 			"agent_id":  ev.AgentID,
+			"to":        ev.To,
+			"reply_to":  ev.ReplyTo,
 			"payload":   []byte(ev.Payload),
 			"timestamp": ev.Timestamp,
 		},
@@ -73,6 +75,36 @@ func (r *Room) ReadScratchpad(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("agentroom: read scratchpad %s: %w", key, err)
 	}
 	return b, nil
+}
+
+// directedScanWindow bounds how far back Directed scans for messages addressed
+// to an agent — directed messages are sparse among broadcasts, so it reads a
+// wide recent slice and filters rather than maintaining a per-recipient index.
+const directedScanWindow = 200
+
+// Directed returns up to count of the most recent events addressed to agentID
+// (Event.To == agentID), newest-first — the read side of directed messaging.
+// Broadcast events (empty To) are excluded. It scans the recent window (bounded
+// by directedScanWindow) and filters; a recipient with no directed messages in
+// that window gets an empty slice.
+func (r *Room) Directed(ctx context.Context, agentID string, count int64) ([]Event, error) {
+	if agentID == "" {
+		return nil, nil
+	}
+	recent, err := r.Recent(ctx, directedScanWindow)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Event, 0, count)
+	for i := len(recent) - 1; i >= 0; i-- { // Recent is oldest-first; walk back for newest-first
+		if recent[i].To == agentID {
+			out = append(out, recent[i])
+			if int64(len(out)) >= count {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // Recent returns up to count of the most recent events on the room stream, in
