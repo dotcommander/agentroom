@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -112,7 +113,7 @@ func tailCmd() *cobra.Command {
 			for _, e := range events {
 				printEvent(e)
 			}
-			agent, _ := c.Flags().GetString("agent")
+			agent := resolveAgent(c)
 			writeHeartbeat(c.Context(), room, agent, "")
 			return nil
 		},
@@ -130,7 +131,7 @@ func postCmd() *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
-			agent, _ := c.Flags().GetString("agent")
+			agent := resolveAgent(c)
 			var payload []byte
 			if len(args) == 2 {
 				payload = []byte(args[1])
@@ -233,7 +234,7 @@ func claimCmd() *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
-			agent, _ := c.Flags().GetString("agent")
+			agent := resolveAgent(c)
 			ttl, _ := c.Flags().GetDuration("ttl")
 			ok, err := room.Claim(c.Context(), args[0], agent, ttl)
 			if err != nil {
@@ -261,7 +262,7 @@ func doneCmd() *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
-			agent, _ := c.Flags().GetString("agent")
+			agent := resolveAgent(c)
 			var result []byte
 			if len(args) == 2 {
 				result = []byte(args[1])
@@ -286,7 +287,7 @@ func leaveCmd() *cobra.Command {
 		RunE: func(c *cobra.Command, _ []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
-			agent, _ := c.Flags().GetString("agent")
+			agent := resolveAgent(c)
 			if err := room.ClearPresence(c.Context(), agent); err != nil {
 				return err
 			}
@@ -309,19 +310,61 @@ func printEvent(e agentroom.Event) {
 	}
 }
 
-// defaultAgent is the identity manual CLI commands attribute presence and task
-// claims to. AGENTROOM_AGENT pins it explicitly (so a Claude session can give
-// its calls one stable handle). Otherwise it is cli@<hostname>:<ppid> -- the
-// parent shell's PID makes it stable across every invocation in one terminal
-// (so claim and done share an owner) yet distinct between concurrent terminals
-// on the same host, avoiding a shared-key collision.
+// defaultAgent is the human label manual CLI commands attribute presence and
+// task claims to BEFORE qualification. AGENTROOM_AGENT pins it explicitly;
+// otherwise it is the bare "cli" label. resolveAgent/qualifyAgent then append a
+// per-session token so two agents that pick the same label never share a key.
 func defaultAgent() string {
 	if v := os.Getenv("AGENTROOM_AGENT"); v != "" {
 		return v
 	}
+	return "cli"
+}
+
+// sessionToken is the per-session disambiguator appended to every handle.
+// CLAUDE_SESSION_ID (exposed to Bash tool commands by Claude Code) is preferred:
+// it is stable across every call in one session and matches the token the hook
+// presence path derives via shortSession. Outside a Claude session it falls back
+// to <hostname>-<ppid> -- stable per terminal, distinct between concurrent shells.
+func sessionToken() string {
+	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
+		return shortSession(id)
+	}
 	host := "cli"
 	if h, err := os.Hostname(); err == nil && h != "" {
-		host = "cli@" + h
+		host = h
 	}
-	return fmt.Sprintf("%s:%d", host, os.Getppid())
+	return fmt.Sprintf("%s-%d", host, os.Getppid())
+}
+
+// sanitizeHandle replaces characters that would corrupt the Redis key structure
+// (':' is the key separator) or the presence SCAN glob ('*' '?' '[' ']'), plus
+// whitespace, with '-'. Alphanumerics and '-' '_' '@' '.' pass through unchanged.
+func sanitizeHandle(h string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case ':', '*', '?', '[', ']', ' ', '\t', '\n', '\r':
+			return '-'
+		}
+		return r
+	}, h)
+}
+
+// qualifyAgent makes a handle collision-proof: sanitize the label, then append
+// the session token so two agents that pick the same name never share a key.
+func qualifyAgent(handle string) string {
+	h := sanitizeHandle(handle)
+	tok := sessionToken()
+	if h == "" {
+		return tok
+	}
+	return h + "-" + tok
+}
+
+// resolveAgent reads the --agent flag and qualifies it: the single source of
+// truth for the identity a command acts as (presence key, event attribution,
+// claim owner).
+func resolveAgent(cmd *cobra.Command) string {
+	raw, _ := cmd.Flags().GetString("agent")
+	return qualifyAgent(raw)
 }

@@ -28,13 +28,14 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 
 	ctx := context.Background()
 	const agent = "qa-leave"
+	qAgent := qualifyAgent(agent) // CLI qualifies --agent; presence key carries the session token
 
 	// Seed presence via Heartbeat, matching the mechanism the integration
 	// test uses for post-driven presence.
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	cfg := roomCfg(mr.Addr(), defaultRepo(), "main")
 	room := agentroom.NewRoom(rdb, cfg)
-	if err := room.Heartbeat(ctx, agent, "tester", cfg.PresenceTTL); err != nil {
+	if err := room.Heartbeat(ctx, qAgent, "tester", cfg.PresenceTTL); err != nil {
 		t.Fatalf("seed heartbeat: %v", err)
 	}
 	_ = rdb.Close()
@@ -46,8 +47,8 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("presence before leave: %v", err)
 	}
-	if _, ok := pres[agent]; !ok {
-		t.Fatalf("agent %q absent from presence before leave; got %v", agent, pres)
+	if _, ok := pres[qAgent]; !ok {
+		t.Fatalf("agent %q absent from presence before leave; got %v", qAgent, pres)
 	}
 	_ = rdb2.Close()
 
@@ -63,8 +64,8 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("presence after leave: %v", err)
 	}
-	if _, ok := pres[agent]; ok {
-		t.Fatalf("agent %q still present after leave; got %v", agent, pres)
+	if _, ok := pres[qAgent]; ok {
+		t.Fatalf("agent %q still present after leave; got %v", qAgent, pres)
 	}
 	_ = rdb3.Close()
 

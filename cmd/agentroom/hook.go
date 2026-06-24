@@ -120,7 +120,8 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 		"",
 		"Sign in -- tell the room who you are and what you're here to do:",
 		"  agentroom post AGENT_JOINED '{\"role\":\"<what you do>\",\"working_on\":\"<your goal>\"}' --agent <your-handle>",
-		"(free-form; no required schema)",
+		"(free-form; no required schema. Pick a short plain handle -- your session id is",
+		"appended automatically, so two agents sharing a handle stay distinct.)",
 		"",
 		"== who's here ==",
 	}

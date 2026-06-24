@@ -60,6 +60,11 @@ coordination infrastructure, not a feed to keep up with. The recipes below are h
 a shell agent (Claude Code, pi, codex) should drive a room. Every command is
 free-form; nothing is enforced, so these are conventions, not a protocol.
 
+> **Handles are auto-qualified.** Pick a short plain `--agent` name; the CLI appends a
+> per-session token (your `CLAUDE_SESSION_ID`, or `<host>-<ppid>` outside a Claude session),
+> so `--agent fixer-1` is attributed as e.g. `fixer-1-a1b2c3d4`. Two agents that pick the
+> same handle stay distinct in presence and attribution — you never have to disambiguate by hand.
+
 ### A worked session: two agents, one repo
 
 Here's the whole loop end to end — two agents land in the same room, avoid

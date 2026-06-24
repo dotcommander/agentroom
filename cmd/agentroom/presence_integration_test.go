@@ -44,6 +44,7 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 
 	ctx := context.Background()
 	const agent = "agent-int"
+	qAgent := qualifyAgent(agent) // CLI qualifies --agent; presence key carries the session token
 
 	// Drive `post AGENT_JOINED` through the real root command RunE. This writes
 	// the presence TTL key (opportunistic heartbeat) for `agent`.
@@ -62,8 +63,8 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("presence after post: %v", err)
 	}
-	if _, ok := pres[agent]; !ok {
-		t.Fatalf("agent %q absent from presence after post; got %v", agent, pres)
+	if _, ok := pres[qAgent]; !ok {
+		t.Fatalf("agent %q absent from presence after post; got %v", qAgent, pres)
 	}
 
 	// Crash simulation: advance past PresenceTTL with NO session-end. The agent
@@ -74,8 +75,8 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("presence after TTL expiry: %v", err)
 	}
-	if _, ok := pres[agent]; ok {
-		t.Fatalf("agent %q still present after PresenceTTL expiry; got %v", agent, pres)
+	if _, ok := pres[qAgent]; ok {
+		t.Fatalf("agent %q still present after PresenceTTL expiry; got %v", qAgent, pres)
 	}
 }
 
@@ -139,7 +140,7 @@ func TestClaimCountRendersAcrossCLI(t *testing.T) {
 	}
 	lines := presenceLines(pres, "", claimsCounter(ctx, room))
 
-	want := "  " + agent + " -- builder: capacity demo (2 claimed)"
+	want := "  " + qualifyAgent(agent) + " -- builder: capacity demo (2 claimed)"
 	found := false
 	for _, l := range lines {
 		if l == want {
