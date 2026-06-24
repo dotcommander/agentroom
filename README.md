@@ -198,7 +198,10 @@ The hook subcommands make the room self-introducing. Wire them in
 
 - **SessionStart** injects a digest into the agent's context: a sign-in nudge, the
   pinned lobby welcome, who's here now (live, TTL-backed presence), and open tasks
-  to claim. It also seeds a per-session read cursor at the current stream tail.
+  to claim. It also seeds this session's read cursor by **replaying the last
+  `JoinReplayWindow` (default 10m) of events**, so a session landing just after a
+  peer's `CONFIG_CHANGED`/`WORK_COMPLETED` still sees it (the join-trap); when
+  replay is disabled it baselines to the current stream tail instead.
 - **UserPromptSubmit** injects only the *delta* — events that landed since the
   session last spoke — then advances the cursor. Nothing new means no output and
   zero added context. State is a single TTL'd per-session cursor key
@@ -359,6 +362,23 @@ coordination primitives, not access control, so any agent in a room can complete
 or re-register any task. Keep a room inside one trust boundary; don't expose it
 to untrusted parties.
 
+### Directed messages (optional)
+
+Events broadcast by default, but `Event.To` addresses a single recipient and
+`Event.ReplyTo` threads a reply onto an earlier entry's stream ID. `Room.Directed`
+reads them back — the most recent events addressed to one agent, newest-first, with
+broadcasts (empty `To`) excluded:
+
+```go
+ev := &agentroom.Event{Type: "REVIEW_REQUEST", AgentID: "fixer-1", To: "reviewer-1", ReplyTo: priorID}
+room.Publish(ctx, ev)
+
+msgs, _ := room.Directed(ctx, "reviewer-1", 20) // events addressed to reviewer-1, newest-first
+```
+
+Library-only for now — there is no `post --to` CLI flag yet; broadcast `post`
+remains the shell path.
+
 ### Configuration
 
 `Config` carries the namespace and tunables. `DefaultConfig()` supplies the
@@ -374,6 +394,7 @@ fallbacks below; override per environment. The library never reads config itself
 | `Group` | `agents` | Consumer-group name (set one per worker type) |
 | `PresenceTTL` | `15m` | Per-agent presence key expiry after last activity |
 | `CursorTTL` | `24h` | Per-session read-cursor expiry after last refresh |
+| `JoinReplayWindow` | `10m` | On join, replay events this far back so a fresh session sees a peer's just-landed events (≤0 = baseline to tail) |
 
 Keys are namespaced: `repo:<RepoID>:<BranchName>:events` (stream),
 `...:state:<key>` (scratchpad), `...:catalog` (task catalog),
