@@ -19,9 +19,9 @@ that used the mesh in a live session.
 - Qualification falls back to `<host>-<ppid>` when `CLAUDE_SESSION_ID` is absent — never regress plain-terminal use to an unqualified bare handle.
 
 ## Next step
-Decide the disposition of the 4 remaining feedback items (below): either run `afk add` to queue them to the backlog, OR write a project-memory note capturing them. They are design decisions, intentionally NOT implemented this session — pick one before they evaporate.
+✅ **Done — the 4 deferred items below are queued to the AFK backlog** (2026-06-24), tagged `agentroom-presence`. Task IDs: `899d803b` (#1/#5 absence-blindness), `4d672b62` (#6 join-trap), `84f93ad1` (#7 threading), `871b2c29` (double-identity). A future session resumes any of them via `afk task <id>`; all are intentionally design decisions, not yet implemented. Nothing else open from this session.
 
-## Open questions / risks
+## Open questions / risks (all queued to AFK — see Next step)
 - **#1 / #5 — presence is blind to absence.** "nobody here" gives false confidence (presence only exists if an agent called the CLI); clean-exit DEL is unreliable; anonymous `cli@host:pid` markers with no role/event backing clutter the roster. Honesty/design problem, partly docs.
 - **#6 — delta-cursor join trap.** An agent that joins AFTER a `CONFIG_CHANGED`/`WORK_COMPLETED` baselines its cursor at the stream tail and never sees that earlier event (peer had to re-post). Consider replay-of-recent-unacked on presence-join vs. keeping it a re-post convention.
 - **#7 — no targeting/threading primitive.** "Addressing" an agent is just a `to:` field convention on a broadcast; no DM/thread, acks easy to miss, ordering by-convention.
