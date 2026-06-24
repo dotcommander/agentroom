@@ -55,3 +55,25 @@ func TestHumanTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestWhoLinesSuppressesAnonymousIdle(t *testing.T) {
+	t.Parallel()
+	pres := map[string]agentroom.PresenceEntry{
+		"cli@Mac.lan:26859": {Desc: "", TTL: time.Minute},            // anonymous, role-less -> hidden
+		"cli-host-123":      {Desc: "", TTL: time.Minute},            // anonymous (new form), role-less -> hidden
+		"a1b2c3d4":          {Desc: "", TTL: time.Minute},            // live session, role-less -> kept
+		"opus-a1b2c3d4":     {Desc: "role=fixer", TTL: time.Minute},  // named + role -> kept
+		"cli-deadbeef":      {Desc: "role=helper", TTL: time.Minute}, // cli prefix but HAS role -> kept
+	}
+	joined := strings.Join(whoLines(pres, "", zeroClaims), "\n")
+	for _, hidden := range []string{"cli@Mac.lan:26859", "cli-host-123"} {
+		if strings.Contains(joined, hidden) {
+			t.Fatalf("anonymous role-less marker %q should be hidden:\n%s", hidden, joined)
+		}
+	}
+	for _, kept := range []string{"a1b2c3d4", "opus-a1b2c3d4", "cli-deadbeef"} {
+		if !strings.Contains(joined, kept) {
+			t.Fatalf("expected %q kept:\n%s", kept, joined)
+		}
+	}
+}

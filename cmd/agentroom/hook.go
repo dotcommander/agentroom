@@ -123,7 +123,7 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 		"(free-form; no required schema. Pick a short plain handle -- your session id is",
 		"appended automatically, so two agents sharing a handle stay distinct.)",
 		"",
-		"== who's here ==",
+		"== who's here (live TTL presence; absence is not proof nobody's working) ==",
 	}
 	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
 	lines = append(lines, "", "== open tasks you could claim ==")

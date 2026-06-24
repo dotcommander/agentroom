@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dotcommander/agentchat/agentroom"
@@ -41,16 +42,19 @@ func whoCmd() *cobra.Command {
 // presence TTL before it drops. Ids are column-aligned and sorted; the caller's
 // own id is tagged "(you)".
 func whoLines(pres map[string]agentroom.PresenceEntry, selfID string, claimsFor func(string) int) []string {
-	if len(pres) == 0 {
-		return []string{"(nobody here)"}
-	}
 	ids := make([]string, 0, len(pres))
 	width := 0
 	for id := range pres {
+		if isAnonymousIdle(id, pres[id].Desc) {
+			continue // hide role-less default-"cli" markers: clutter, no role/event backing
+		}
 		ids = append(ids, id)
 		if len(id) > width {
 			width = len(id)
 		}
+	}
+	if len(ids) == 0 {
+		return []string{"(nobody here)"}
 	}
 	sort.Strings(ids)
 	lines := make([]string, 0, len(ids))
@@ -80,4 +84,13 @@ func humanTTL(d time.Duration) string {
 		return "expiring"
 	}
 	return d.Round(time.Second).String()
+}
+
+// isAnonymousIdle reports whether id is a default-label "cli" presence marker
+// with no role posted — bare CLI activity (claim/tail/post) that registered
+// liveness without signing in. These clutter the roster with no role or event
+// backing, so `who` hides them. A role-bearing entry (Desc != ""), a live
+// bare-session token, or a real chosen handle is never hidden.
+func isAnonymousIdle(id, desc string) bool {
+	return desc == "" && (strings.HasPrefix(id, "cli@") || strings.HasPrefix(id, "cli-"))
 }
