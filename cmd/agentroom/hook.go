@@ -346,6 +346,9 @@ func userPromptSubmit(c *cobra.Command) error {
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 	writeHeartbeat(ctx, room, shortSession(in.SessionID), "")
+	// Keep any "<handle>-<token>" named entry for this session live too, so it
+	// does not expire while only the anonymous session line is refreshed.
+	_ = room.RefreshSessionPresence(ctx, shortSession(in.SessionID), room.Config().PresenceTTL)
 
 	cursor, err := room.ReadCursor(ctx, in.SessionID)
 	if err != nil {

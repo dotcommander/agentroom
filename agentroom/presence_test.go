@@ -234,3 +234,36 @@ func TestPresenceErrorsOnGetFailure(t *testing.T) {
 		t.Fatalf("expected GET-branch error (read presence), got: %v", err)
 	}
 }
+
+func TestRefreshSessionPresenceKeepsHandleKeyAlive(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+
+	const token = "sess1234"
+	// A manual AGENT_JOINED creates a "<handle>-<token>" key carrying the role.
+	if err := room.Heartbeat(ctx, "opus-"+token, "role=fixer", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	// Age it toward expiry, then refresh via the bare session token.
+	mr.FastForward(50 * time.Second)
+	if err := room.RefreshSessionPresence(ctx, token, time.Minute); err != nil {
+		t.Fatalf("refresh session presence: %v", err)
+	}
+	// Past the original 60s lifetime; only the refresh keeps it alive.
+	mr.FastForward(20 * time.Second)
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	desc, ok := pres["opus-"+token]
+	if !ok {
+		t.Fatal("handle key expired despite RefreshSessionPresence")
+	}
+	if desc != "role=fixer" {
+		t.Fatalf("desc not preserved by refresh: %q", desc)
+	}
+}

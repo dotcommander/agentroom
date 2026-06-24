@@ -182,6 +182,34 @@ func (r *Room) RefreshPresence(ctx context.Context, agentID string, ttl time.Dur
 	return nil
 }
 
+// RefreshSessionPresence refreshes the TTL of every "<handle>-<sessionToken>"
+// presence key — the named records a manual `AGENT_JOINED --agent <handle>`
+// created — preserving each description via RefreshPresence. The per-prompt hook
+// calls this so a named roster entry stays live alongside the bare session key
+// instead of expiring after PresenceTTL while only the anonymous session line is
+// refreshed (the presence identity-split bug). The bare "<sessionToken>" key has
+// no "-" separator and is refreshed separately by the hook's own heartbeat.
+func (r *Room) RefreshSessionPresence(ctx context.Context, sessionToken string, ttl time.Duration) error {
+	if sessionToken == "" {
+		return nil
+	}
+	prefix := r.cfg.PresencePrefix()
+	iter := r.rdb.Scan(ctx, 0, prefix+"*-"+sessionToken, 0).Iterator()
+	for iter.Next(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		agentID := strings.TrimPrefix(iter.Val(), prefix)
+		if err := r.RefreshPresence(ctx, agentID, ttl); err != nil {
+			return err
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("agentroom: scan session presence %s: %w", sessionToken, err)
+	}
+	return nil
+}
+
 // ClearPresence deletes this agent's presence record for a clean fast exit
 // (called on SESSION_ENDED). Absence of the key is not an error.
 func (r *Room) ClearPresence(ctx context.Context, agentID string) error {
