@@ -185,3 +185,29 @@ func TestRefreshPresenceCreatesEmptyWhenAbsent(t *testing.T) {
 		t.Fatalf("ghost desc = %q, want empty", desc)
 	}
 }
+
+func TestPresenceDetailedIncludesDescAndTTL(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	if err := room.Heartbeat(ctx, "agent-1", "role=fixer", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	det, err := room.PresenceDetailed(ctx)
+	if err != nil {
+		t.Fatalf("presence detailed: %v", err)
+	}
+	e, ok := det["agent-1"]
+	if !ok {
+		t.Fatalf("agent-1 absent from detailed presence: %v", det)
+	}
+	if e.Desc != "role=fixer" {
+		t.Fatalf("desc = %q, want %q", e.Desc, "role=fixer")
+	}
+	if e.TTL <= 0 || e.TTL > time.Minute {
+		t.Fatalf("ttl = %v, want in (0, 1m]", e.TTL)
+	}
+}
