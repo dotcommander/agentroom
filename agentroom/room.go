@@ -218,3 +218,44 @@ func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
 	}
 	return out, nil
 }
+
+// PresenceEntry is one live roster record: the agent's free-form description and
+// the time left on its presence TTL before it drops absent a refresh. Surfaced
+// by the `who` command; Presence (the hot digest path) omits the TTL to skip the
+// extra PTTL round-trip per key.
+type PresenceEntry struct {
+	Desc string
+	TTL  time.Duration
+}
+
+// PresenceDetailed is Presence plus each key's remaining TTL — the on-demand
+// roster view behind `who`. Same cursor-based SCAN (never KEYS); additionally
+// reads PTTL per key. Keys that expire mid-scan are skipped. Kept separate from
+// Presence so the per-prompt digest path stays a single GET per key.
+func (r *Room) PresenceDetailed(ctx context.Context) (map[string]PresenceEntry, error) {
+	prefix := r.cfg.PresencePrefix()
+	out := make(map[string]PresenceEntry)
+	iter := r.rdb.Scan(ctx, 0, prefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := iter.Val()
+		desc, err := r.rdb.Get(ctx, key).Result()
+		if errors.Is(err, redis.Nil) {
+			continue // expired between SCAN and GET
+		}
+		if err != nil {
+			return nil, fmt.Errorf("agentroom: read presence %s: %w", key, err)
+		}
+		ttl, err := r.rdb.PTTL(ctx, key).Result()
+		if err != nil {
+			return nil, fmt.Errorf("agentroom: ttl presence %s: %w", key, err)
+		}
+		out[strings.TrimPrefix(key, prefix)] = PresenceEntry{Desc: desc, TTL: ttl}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("agentroom: scan presence detailed: %w", err)
+	}
+	return out, nil
+}
