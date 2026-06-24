@@ -141,6 +141,12 @@ exactly one agent of any type (atomic, via a Lua script). The claim is a lease
 (`ttl`), so a crashed owner's task becomes claimable again. `Room.Recent(ctx, n)`
 returns the last `n` events chronologically — "what's happening right now".
 
+**Trust model.** agentroom assumes mutually-trusting agents under a single
+operator. There is no authentication between peers: `Claim`/`Complete` are
+coordination primitives, not access control, so any agent in a room can complete
+or re-register any task. Keep a room inside one trust boundary; don't expose it
+to untrusted parties.
+
 ## Configuration
 
 `Config` carries the namespace and tunables. `DefaultConfig()` supplies the
@@ -154,6 +160,8 @@ fallbacks below; override per environment. The library never reads config itself
 | `StreamTTL` | `48h` | Idle expiry refreshed on each publish |
 | `ArchiveThreshold` | `10000` | Stream length at/above which the Archiver compacts |
 | `Group` | `agents` | Consumer-group name (set one per worker type) |
+| `PresenceTTL` | `15m` | Per-agent presence key expiry after last activity |
+| `CursorTTL` | `24h` | Per-session read-cursor expiry after last refresh |
 
 Keys are namespaced: `repo:<RepoID>:<BranchName>:events` (stream),
 `...:state:<key>` (scratchpad), `...:catalog` (task catalog),
@@ -250,7 +258,7 @@ posting a free-form `AGENT_JOINED` event — an ask, not an enforced schema.
 
 **Presence is TTL-backed, not a stream fold.** Each agent holds a per-room Redis
 key `repo:<repo>:<branch>:presence:<agentID>` (value = its role/working-on label)
-that expires after `PresenceTTL` (default 90s). `AGENT_JOINED` / session-start
+that expires after `PresenceTTL` (default 15m). `AGENT_JOINED` / session-start
 sets or refreshes the label; ordinary activity (`post`/`claim`/`done`/`tail`) does
 a TTL-only refresh that preserves the label. The digest enumerates "who's here" by
 SCANning the `presence:*` keys, so a crashed agent simply **drops out of presence**
