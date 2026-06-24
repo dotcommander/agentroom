@@ -13,6 +13,8 @@ import (
 // description plus a self-derived load snapshot (claims = outstanding claimed-but-
 // -not-done tasks, taken at write time). The struct intentionally leaves room for
 // an optional harness-supplied status field later without another format change.
+const emptyRosterMsg = "(nobody else here)"
+
 type presenceValue struct {
 	Desc   string `json:"desc"`
 	Claims int    `json:"claims"`
@@ -57,7 +59,7 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 		lines = append(lines, presenceLine(id, v))
 	}
 	if len(lines) == 0 {
-		return []string{"(nobody else here)"}
+		return []string{emptyRosterMsg}
 	}
 	return lines
 }

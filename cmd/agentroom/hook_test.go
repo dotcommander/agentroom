@@ -94,7 +94,7 @@ func TestHookGuardsEmptySessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	ctx := context.Background()
 	if err := runCLI(ctx, mr.Addr(), "hook", "session-start"); err != nil {
