@@ -32,6 +32,7 @@ type Config struct {
 	Group            string        // consumer-group name for Runtime delivery
 	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
 	CursorTTL        time.Duration // per-session read-cursor key auto-expires this long after the last refresh; a lost/expired cursor simply re-baselines to the stream tail
+	JoinReplayWindow time.Duration // a freshly-joined session seeds its read cursor this far back instead of the bare tail, so it replays a peer's just-landed events (the join-trap); non-positive disables replay
 }
 
 // defaultGroup is the fallback consumer-group name used when Config.Group is
@@ -48,6 +49,7 @@ func DefaultConfig() Config {
 		Group:            defaultGroup,
 		PresenceTTL:      15 * time.Minute,
 		CursorTTL:        24 * time.Hour,
+		JoinReplayWindow: 10 * time.Minute,
 	}
 }
 

@@ -155,3 +155,40 @@ func TestCursorRoundTrip(t *testing.T) {
 		t.Errorf("cursor = %q, want 5-0", got)
 	}
 }
+
+func TestReplayCursorReplaysRecentEvents(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+
+	// A peer posts an event just before we join.
+	if err := room.Publish(ctx, &Event{Type: "CONFIG_CHANGED", AgentID: "peer"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	last, err := room.LastID(ctx)
+	if err != nil {
+		t.Fatalf("last id: %v", err)
+	}
+
+	// The trap: a session baselining to the bare tail surfaces no prior events.
+	trapped, err := room.Since(ctx, last, 20)
+	if err != nil {
+		t.Fatalf("since tail: %v", err)
+	}
+	if len(trapped) != 0 {
+		t.Fatalf("tail baseline should surface no prior events, got %d", len(trapped))
+	}
+
+	// The fix: a replay cursor (now-window) surfaces the just-landed event.
+	replay := room.ReplayCursorFrom(time.Now(), 10*time.Minute)
+	got, err := room.Since(ctx, replay, 20)
+	if err != nil {
+		t.Fatalf("since replay: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("replay cursor should surface the recent CONFIG_CHANGED, got none")
+	}
+}

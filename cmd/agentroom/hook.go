@@ -320,11 +320,28 @@ func seedCursor(ctx context.Context, addr, repo, branch, sessionID string) {
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
-	last, err := room.LastID(ctx)
-	if err != nil {
+	cursor := joinCursor(ctx, room)
+	if cursor == "" {
 		return
 	}
-	_ = room.WriteCursor(ctx, sessionID, last, room.Config().CursorTTL)
+	_ = room.WriteCursor(ctx, sessionID, cursor, room.Config().CursorTTL)
+}
+
+// joinCursor picks a new session's initial read cursor: replay the last
+// JoinReplayWindow of events so a session landing just after a peer's
+// CONFIG_CHANGED/WORK_COMPLETED still sees it (the join-trap), or — when replay
+// is disabled (non-positive window) or the stream is unreadable — baseline to
+// the tail so no full backlog is dumped. The replay read stays bounded by
+// maxDeltaEvents.
+func joinCursor(ctx context.Context, room *agentroom.Room) string {
+	if w := room.Config().JoinReplayWindow; w > 0 {
+		return room.ReplayCursorFrom(time.Now(), w)
+	}
+	last, err := room.LastID(ctx)
+	if err != nil {
+		return ""
+	}
+	return last
 }
 
 // userPromptSubmit injects room events that landed since this session last spoke,
@@ -356,9 +373,10 @@ func userPromptSubmit(c *cobra.Command) error {
 	}
 	if cursor == "" {
 		// No cursor yet (session-start seed missed, e.g. redis was down then):
-		// baseline to the tail so we never dump the full backlog.
-		if last, lerr := room.LastID(ctx); lerr == nil {
-			_ = room.WriteCursor(ctx, in.SessionID, last, room.Config().CursorTTL)
+		// seed the join cursor (replay-recent, or tail when replay is disabled)
+		// so a recovered session still catches a peer's just-landed events.
+		if c := joinCursor(ctx, room); c != "" {
+			_ = room.WriteCursor(ctx, in.SessionID, c, room.Config().CursorTTL)
 		}
 		return nil
 	}

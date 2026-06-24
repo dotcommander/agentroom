@@ -151,6 +151,17 @@ func (r *Room) WriteCursor(ctx context.Context, sessionID, id string, ttl time.D
 	return nil
 }
 
+// ReplayCursorFrom returns the read cursor a freshly-joined session should start
+// from so its first delta replays events from the last window — instead of
+// baselining to the bare stream tail and missing a peer's just-landed
+// CONFIG_CHANGED/WORK_COMPLETED (the join-trap). The result is a
+// millisecond-timestamp stream ID floor ("<ms>-0"); Since(cursor) then yields
+// events newer than now-window, still bounded by the caller's count cap. `now`
+// is a parameter for testability.
+func (r *Room) ReplayCursorFrom(now time.Time, window time.Duration) string {
+	return fmt.Sprintf("%d-0", now.Add(-window).UnixMilli())
+}
+
 // Heartbeat writes (or refreshes) this agent's live-presence record: a TTL key
 // holding desc (role / working_on). It is called on join and on every CLI
 // invocation, so the key auto-expires ttl after the agent's last activity — a
