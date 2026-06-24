@@ -309,9 +309,19 @@ func printEvent(e agentroom.Event) {
 	}
 }
 
+// defaultAgent is the identity manual CLI commands attribute presence and task
+// claims to. AGENTROOM_AGENT pins it explicitly (so a Claude session can give
+// its calls one stable handle). Otherwise it is cli@<hostname>:<ppid> -- the
+// parent shell's PID makes it stable across every invocation in one terminal
+// (so claim and done share an owner) yet distinct between concurrent terminals
+// on the same host, avoiding a shared-key collision.
 func defaultAgent() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return "cli@" + h
+	if v := os.Getenv("AGENTROOM_AGENT"); v != "" {
+		return v
 	}
-	return "cli"
+	host := "cli"
+	if h, err := os.Hostname(); err == nil && h != "" {
+		host = "cli@" + h
+	}
+	return fmt.Sprintf("%s:%d", host, os.Getppid())
 }
