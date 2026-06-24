@@ -157,6 +157,35 @@ func TestOutstandingClaimsErrorsOnOutage(t *testing.T) {
 	}
 }
 
+type outstandingClaimsFixture struct {
+	t     *testing.T
+	room  *Room
+	ctx   context.Context
+	lease time.Duration
+}
+
+func (f outstandingClaimsFixture) claim(id string, agentID string) {
+	f.t.Helper()
+	ok, err := f.room.Claim(f.ctx, id, agentID, f.lease)
+	if err != nil {
+		f.t.Fatalf("claim %s as %s: %v", id, agentID, err)
+	}
+	if !ok {
+		f.t.Fatalf("claim %s as %s not granted", id, agentID)
+	}
+}
+
+func (f outstandingClaimsFixture) require(agentID string, want int, label string) {
+	f.t.Helper()
+	n, err := f.room.OutstandingClaims(f.ctx, agentID)
+	if err != nil {
+		f.t.Fatalf("outstanding %s: %v", label, err)
+	}
+	if n != want {
+		f.t.Fatalf("%s outstanding = %d, want %d", label, n, want)
+	}
+}
+
 func TestOutstandingClaims(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -165,51 +194,24 @@ func TestOutstandingClaims(t *testing.T) {
 	room, mr := newTestRoom(t)
 	ctx := context.Background()
 	const lease = 60 * time.Second
+	claims := outstandingClaimsFixture{t: t, room: room, ctx: ctx, lease: lease}
 
 	// agentA claims two tasks; a different agent claims a third.
 	for _, id := range []string{"oc-1", "oc-2"} {
-		ok, err := room.Claim(ctx, id, "agentA", lease)
-		if err != nil {
-			t.Fatalf("claim %s: %v", id, err)
-		}
-		if !ok {
-			t.Fatalf("claim %s not granted", id)
-		}
+		claims.claim(id, "agentA")
 	}
-	if ok, err := room.Claim(ctx, "oc-3", "agentB", lease); err != nil || !ok {
-		t.Fatalf("claim oc-3 as agentB: ok=%v err=%v", ok, err)
-	}
+	claims.claim("oc-3", "agentB")
 
-	n, err := room.OutstandingClaims(ctx, "agentA")
-	if err != nil {
-		t.Fatalf("outstanding agentA: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("agentA outstanding = %d, want 2", n)
-	}
-	if n, err := room.OutstandingClaims(ctx, "agentB"); err != nil || n != 1 {
-		t.Fatalf("agentB outstanding = %d (err %v), want 1", n, err)
-	}
+	claims.require("agentA", 2, "agentA")
+	claims.require("agentB", 1, "agentB")
 
 	// Completing one of agentA's tasks releases its owner lease → count drops.
 	if err := room.Complete(ctx, "oc-1", nil); err != nil {
 		t.Fatalf("complete oc-1: %v", err)
 	}
-	n, err = room.OutstandingClaims(ctx, "agentA")
-	if err != nil {
-		t.Fatalf("outstanding after complete: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("agentA outstanding after complete = %d, want 1", n)
-	}
+	claims.require("agentA", 1, "agentA after complete")
 
 	// Crash simulation: let the remaining lease expire (no Complete) → count → 0.
 	mr.FastForward(lease + time.Second)
-	n, err = room.OutstandingClaims(ctx, "agentA")
-	if err != nil {
-		t.Fatalf("outstanding after expiry: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("agentA outstanding after lease expiry = %d, want 0", n)
-	}
+	claims.require("agentA", 0, "agentA after lease expiry")
 }

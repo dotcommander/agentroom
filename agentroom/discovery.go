@@ -16,10 +16,6 @@ const (
 	taskDoneSuffix  = ":done"
 )
 
-// taskKeyGlob matches every task coordination key for a room (Config.TaskKey
-// uses ":task:" as its segment); OutstandingClaims narrows to the owner leases.
-const taskKeyGlob = ":task:*"
-
 type taskStateKeys struct {
 	done  string
 	owner string
