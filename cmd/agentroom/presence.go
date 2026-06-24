@@ -9,30 +9,22 @@ import (
 	"github.com/dotcommander/agentchat/agentroom"
 )
 
-// presenceValue is the JSON shape stored in an agent's presence key: a free-form
-// description plus a self-derived load snapshot (claims = outstanding claimed-but-
-// -not-done tasks, taken at write time). The struct intentionally leaves room for
-// an optional harness-supplied status field later without another format change.
+// presenceValue is the render-time view of one roster entry: the agent's free-form
+// description (the raw presence-key value) plus a live claim count. The presence
+// key stores only the opaque desc string; Claims is always derived at render time
+// (see presenceLines), never read from storage.
 const emptyRosterMsg = "(nobody else here)"
 
 type presenceValue struct {
-	Desc   string `json:"desc"`
-	Claims int    `json:"claims"`
+	Desc   string
+	Claims int
 }
 
-// decodePresence parses a stored presence value tolerantly: a JSON object yields
-// its fields; a legacy flat description string (pre-JSON keys, or any non-JSON
-// bytes) degrades to desc-only with zero claims. Never errors — presence
-// rendering must not break on an old or malformed value.
+// decodePresence wraps a stored presence value (the opaque role/working-on
+// description string, possibly empty) into a presenceValue for rendering. Claims
+// is filled in at render time, never parsed from storage. Never errors — presence
+// rendering must not break on any value.
 func decodePresence(raw string) presenceValue {
-	if raw == "" {
-		return presenceValue{}
-	}
-	var v presenceValue
-	if err := json.Unmarshal([]byte(raw), &v); err == nil {
-		return v
-	}
-	// Not JSON -> treat the whole raw string as a legacy description.
 	return presenceValue{Desc: raw}
 }
 
