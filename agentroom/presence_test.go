@@ -2,6 +2,7 @@ package agentroom
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,5 +210,27 @@ func TestPresenceDetailedIncludesDescAndTTL(t *testing.T) {
 	}
 	if e.TTL <= 0 || e.TTL > time.Minute {
 		t.Fatalf("ttl = %v, want in (0, 1m]", e.TTL)
+	}
+}
+
+func TestPresenceErrorsOnGetFailure(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+
+	// Poison a key under the presence prefix with the WRONG type (a hash):
+	// SCAN still returns it, but GET returns a non-Nil WRONGTYPE error, which
+	// isolates the GET-error branch (not the SCAN/iter.Err path).
+	mr.HSet(room.cfg.PresenceKey("poison"), "field", "value")
+
+	_, err := room.Presence(ctx)
+	if err == nil {
+		t.Fatal("Presence() should error when GET on a presence key fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "read presence") {
+		t.Fatalf("expected GET-branch error (read presence), got: %v", err)
 	}
 }

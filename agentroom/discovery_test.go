@@ -2,6 +2,7 @@ package agentroom
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -214,4 +215,25 @@ func TestOutstandingClaims(t *testing.T) {
 	// Crash simulation: let the remaining lease expire (no Complete) → count → 0.
 	mr.FastForward(lease + time.Second)
 	claims.require("agentA", 0, "agentA after lease expiry")
+}
+
+func TestOutstandingClaimsErrorsOnGetFailure(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+
+	// Poison a task-owner key with the WRONG type (a hash) so SCAN returns it
+	// but GET fails with a non-Nil error — isolates the GET-error branch.
+	mr.HSet(room.cfg.TaskKey("poison")+taskOwnerSuffix, "field", "value")
+
+	_, err := room.OutstandingClaims(ctx, "agent-1")
+	if err == nil {
+		t.Fatal("OutstandingClaims() should error when GET on a claim key fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "read claim") {
+		t.Fatalf("expected GET-branch error (read claim), got: %v", err)
+	}
 }
