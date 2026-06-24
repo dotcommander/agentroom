@@ -77,3 +77,33 @@ func TestWhoLinesSuppressesAnonymousIdle(t *testing.T) {
 		}
 	}
 }
+
+func TestRedundantSessionKeysCollapsesBareToken(t *testing.T) {
+	t.Parallel()
+	got := redundantSessionKeys([]string{"abc12345", "opus-abc12345", "lonelytok", "bob-deadbeef", "deadbeef"})
+	for _, want := range []string{"abc12345", "deadbeef"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("%q should be redundant (a named <handle>-%s entry exists)", want, want)
+		}
+	}
+	for _, keep := range []string{"lonelytok", "opus-abc12345", "bob-deadbeef"} {
+		if _, ok := got[keep]; ok {
+			t.Fatalf("%q should NOT be redundant", keep)
+		}
+	}
+}
+
+func TestWhoLinesCollapsesSessionDuplicate(t *testing.T) {
+	t.Parallel()
+	pres := map[string]agentroom.PresenceEntry{
+		"abc12345":      {Desc: "", TTL: time.Minute},           // bare session token (hook), role-less
+		"opus-abc12345": {Desc: "role=fixer", TTL: time.Minute}, // same session, named + role
+	}
+	lines := whoLines(pres, "", zeroClaims)
+	if len(lines) != 1 {
+		t.Fatalf("agent should show exactly once, got %d lines: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "opus-abc12345") {
+		t.Fatalf("named entry should be the surviving row: %q", lines[0])
+	}
+}

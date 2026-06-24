@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/dotcommander/agentchat/agentroom"
 )
@@ -33,11 +34,38 @@ func decodePresence(raw string) presenceValue {
 // calling session's own agent id and is omitted (you are not "someone else
 // here"). Output shape is preserved: "  <id> -- <desc>" (or "  <id>" when the
 // agent posted no role/working_on), and "(nobody else here)" when empty.
+// redundantSessionKeys returns the bare "<sessionToken>" presence ids that are
+// ALSO represented by a named "<handle>-<sessionToken>" entry — the same agent
+// shown twice (the hook writes the bare session-token key; a manual AGENT_JOINED
+// writes the named key). The roster collapses to the named entry, which carries
+// the role, hiding the bare duplicate. O(n^2) over the small roster set.
+func redundantSessionKeys(ids []string) map[string]struct{} {
+	redundant := make(map[string]struct{})
+	for _, bare := range ids {
+		suffix := "-" + bare
+		for _, other := range ids {
+			if other != bare && strings.HasSuffix(other, suffix) {
+				redundant[bare] = struct{}{}
+				break
+			}
+		}
+	}
+	return redundant
+}
+
 func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID string) int) []string {
+	all := make([]string, 0, len(pres))
+	for id := range pres {
+		all = append(all, id)
+	}
+	redundant := redundantSessionKeys(all)
 	ids := make([]string, 0, len(pres))
 	for id := range pres {
 		if id == selfID {
 			continue
+		}
+		if _, dup := redundant[id]; dup {
+			continue // bare session key collapsed into its named "<handle>-<token>" entry
 		}
 		ids = append(ids, id)
 	}
