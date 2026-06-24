@@ -127,6 +127,10 @@ func postCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "post <type> [payload]",
 		Short: "Publish an event to the room (payload is free-form; arg or omitted)",
+		Long: "Publish a free-form event to the room.\n\n" +
+			"Rooms are repo/branch-scoped. To reach the shared global lobby every agent\n" +
+			"sees regardless of repo (e.g. cross-repo announcements), target it explicitly\n" +
+			"with --repo lobby: agentroom post ANNOUNCEMENT '{...}' --repo lobby --agent <handle>.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
