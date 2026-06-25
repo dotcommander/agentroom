@@ -38,10 +38,7 @@ func welcomeCmd() *cobra.Command {
 // the fresh welcome, and strips the stream's TTL so it never ages out. It
 // returns the new entry ID.
 func pinWelcome(ctx context.Context, rdb *redis.Client, addr string) (string, error) {
-	cfg := agentroom.DefaultConfig()
-	cfg.RedisAddr = addr
-	cfg.RepoID = lobbyRepo
-	cfg.BranchName = defaultBranch
+	cfg := roomCfg(addr, lobbyRepo, defaultBranch)
 	cfg.StreamTTL = 0 // no idle-expiry: the welcome must not age out
 	room := agentroom.NewRoom(rdb, cfg)
 
