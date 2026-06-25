@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 )
 
@@ -52,10 +53,12 @@ func sessionStart(c *cobra.Command) error {
 	}
 	repo, branch := resolveRoom(in.CWD)
 	selfID := shortSession(in.SessionID)
-	joinLobby(c.Context(), addr, repo, branch, in.SessionID)
-	writeLocalHeartbeat(c.Context(), addr, repo, branch, selfID)
-	seedCursor(c.Context(), addr, repo, branch, in.SessionID)
-	digest := buildDigest(c.Context(), addr, repo, branch, selfID)
+	rdb := newRedisClient(addr)
+	defer func() { _ = rdb.Close() }()
+	joinLobby(c.Context(), rdb, addr, repo, branch, in.SessionID)
+	writeLocalHeartbeat(c.Context(), rdb, addr, repo, branch, selfID)
+	seedCursor(c.Context(), rdb, addr, repo, branch, in.SessionID)
+	digest := buildDigest(c.Context(), rdb, addr, repo, branch, selfID)
 	if digest == "" {
 		return nil
 	}
@@ -102,9 +105,7 @@ func resolveRoom(cwd string) (string, string) {
 // presence keys) plus open tasks. Returns "" if redis is unreachable
 // so the session is never blocked. The noisy lobby and raw recent-activity
 // feeds are intentionally omitted — use `agentroom tail` for the full feed.
-func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string {
-	rdb := newRedisClient(addr)
-	defer func() { _ = rdb.Close() }()
+func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, selfID string) string {
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
@@ -140,9 +141,7 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 // session is visible cross-repo, recording which local room it belongs to. It
 // publishes with StreamTTL=0 so it never re-arms expiry on the persistent lobby
 // stream (the welcome banner relies on that). Never fails the session.
-func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
-	rdb := newRedisClient(addr)
-	defer func() { _ = rdb.Close() }()
+func joinLobby(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
 	cfg := roomCfg(addr, lobbyRepo, defaultBranch)
 	cfg.StreamTTL = 0
 	lobby := agentroom.NewRoom(rdb, cfg)
@@ -163,9 +162,7 @@ func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
 // room with a TTL key, so it appears in "who's here" without depending on the
 // event fold. The description starts empty; a later `post AGENT_JOINED` refreshes
 // it with role/working_on. Never fails the session.
-func writeLocalHeartbeat(ctx context.Context, addr, repo, branch, agentID string) {
-	rdb := newRedisClient(addr)
-	defer func() { _ = rdb.Close() }()
+func writeLocalHeartbeat(ctx context.Context, rdb *redis.Client, addr, repo, branch, agentID string) {
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
@@ -319,16 +316,14 @@ func clip(s string, n int) string {
 }
 
 const (
-	hookOpTimeout = 2 * time.Second
-	maxDeltaEvents  = 20
+	hookOpTimeout  = 2 * time.Second
+	maxDeltaEvents = 20
 )
 
 // seedCursor sets this session's read cursor to the current stream tail so the
 // first UserPromptSubmit delta covers only events published after sign-in, never
 // the full backlog. Best-effort: never fails the session.
-func seedCursor(ctx context.Context, addr, repo, branch, sessionID string) {
-	rdb := newRedisClient(addr)
-	defer func() { _ = rdb.Close() }()
+func seedCursor(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
