@@ -53,9 +53,7 @@ func envOr(key, def string) string {
 // redis client. Production uses the default (a real client for --addr); tests
 // override this var to inject a single shared miniredis-backed client so a
 // goleak check sees one client lifecycle, not one pool per invocation.
-var newRedisClient = func(addr string) *redis.Client {
-	return agentroom.NewClient(addr)
-}
+var newRedisClient = agentroom.NewClient
 
 // defaultRepo is the default room namespace: REPO_ID if set, else the current
 // directory's basename -- so ad-hoc CLI use targets this repo's room, matching
