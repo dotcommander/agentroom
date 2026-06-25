@@ -149,21 +149,45 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agentroom: scan open tasks: %w", err)
 	}
-	var open []Task
+	type taskStateCmds struct {
+		msg   redis.XMessage
+		done  *redis.StringCmd
+		owner *redis.StringCmd
+	}
+
+	pipe := r.rdb.Pipeline()
+	candidates := make([]taskStateCmds, 0, len(msgs))
 	for _, msg := range msgs {
 		typ := stringField(msg.Values, "type")
 		if _, ok := defs[typ]; !ok {
 			continue
 		}
-		st, err := r.TaskState(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-		if st.State != TaskOpen {
+		taskKeys := r.taskStateKeys(msg.ID)
+		candidates = append(candidates, taskStateCmds{
+			msg:   msg,
+			done:  pipe.Get(ctx, taskKeys.done),
+			owner: pipe.Get(ctx, taskKeys.owner),
+		})
+	}
+	if len(candidates) > 0 {
+		_, _ = pipe.Exec(ctx)
+	}
+
+	var open []Task
+	for _, candidate := range candidates {
+		if _, err := candidate.done.Result(); err == nil {
 			continue
+		} else if !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("agentroom: task state %s: %w", candidate.msg.ID, err)
 		}
-		task := Task{ID: msg.ID, Type: typ}
-		if p := stringField(msg.Values, "payload"); p != "" {
+		if _, err := candidate.owner.Result(); err == nil {
+			continue
+		} else if !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("agentroom: task state %s: %w", candidate.msg.ID, err)
+		}
+		typ := stringField(candidate.msg.Values, "type")
+		task := Task{ID: candidate.msg.ID, Type: typ}
+		if p := stringField(candidate.msg.Values, "payload"); p != "" {
 			task.Payload = json.RawMessage(p)
 		}
 		open = append(open, task)
