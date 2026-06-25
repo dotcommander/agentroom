@@ -59,20 +59,27 @@ func DefaultConfig() Config {
 	}
 }
 
+// roomPrefix is the "repo:<id>:<branch>" namespace every room key is built on —
+// the single source of truth for the key layout that Presence/Archiver SCAN
+// globs ("repo:*:events", the presence prefix) depend on.
+func (c Config) roomPrefix() string {
+	return "repo:" + c.RepoID + ":" + c.BranchName
+}
+
 // StreamKey is the Redis Streams key for this room's event log.
 func (c Config) StreamKey() string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":events"
+	return c.roomPrefix() + ":events"
 }
 
 // ScratchpadPrefix is the key prefix for this room's transient KV scratchpad.
 func (c Config) ScratchpadPrefix() string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":state:"
+	return c.roomPrefix() + ":state:"
 }
 
 // PresencePrefix is the key prefix for this room's live per-agent presence
 // records. SCAN this prefix to enumerate agents active within PresenceTTL.
 func (c Config) PresencePrefix() string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":presence:"
+	return c.roomPrefix() + ":presence:"
 }
 
 // PresenceKey is the TTL key holding one agent's presence description (role /
@@ -87,19 +94,19 @@ func (c Config) PresenceKey(agentID string) string {
 // and advances it, so each prompt injects only the delta. It expires CursorTTL
 // after the last refresh, so a dead session's cursor self-evicts.
 func (c Config) CursorKey(sessionID string) string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":cursor:" + sessionID
+	return c.roomPrefix() + ":cursor:" + sessionID
 }
 
 // CatalogKey is the Redis hash holding this room's self-describing task catalog
 // (task type -> TaskDef). Agents read it to discover what work the room knows.
 func (c Config) CatalogKey() string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":catalog"
+	return c.roomPrefix() + ":catalog"
 }
 
 // TaskKey is the base key for one task's coordination state, suffixed with
 // ":owner" (the claim lease) and ":done" (the completion record).
 func (c Config) TaskKey(id string) string {
-	return "repo:" + c.RepoID + ":" + c.BranchName + ":task:" + id
+	return c.roomPrefix() + ":task:" + id
 }
 
 // Task coordination states reported by TaskState.
