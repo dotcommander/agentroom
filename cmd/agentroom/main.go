@@ -54,7 +54,7 @@ func envOr(key, def string) string {
 // override this var to inject a single shared miniredis-backed client so a
 // goleak check sees one client lifecycle, not one pool per invocation.
 var newRedisClient = func(addr string) *redis.Client {
-	return redis.NewClient(&redis.Options{Addr: addr})
+	return agentroom.NewClient(addr)
 }
 
 // defaultRepo is the default room namespace: REPO_ID if set, else the current

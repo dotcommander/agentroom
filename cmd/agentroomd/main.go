@@ -45,7 +45,7 @@ func main() {
 	cfg.RepoID = envOr("REPO_ID", "demo")
 	cfg.BranchName = envOr("BRANCH_NAME", "main")
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	rdb := agentroom.NewClient(cfg.RedisAddr)
 	defer func() { _ = rdb.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
