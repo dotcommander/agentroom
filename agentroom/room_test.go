@@ -61,6 +61,30 @@ func TestPublishWritesEventAndTTL(t *testing.T) {
 	}
 }
 
+func TestPublishBoundsStreamLength(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	room.cfg.StreamMaxLen = 5
+	ctx := context.Background()
+
+	for i := 0; i < 50; i++ {
+		if err := room.Publish(ctx, &Event{Type: "EVENT", AgentID: "engine-1"}); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+
+	length, err := room.rdb.XLen(ctx, room.cfg.StreamKey()).Result()
+	if err != nil {
+		t.Fatalf("xlen: %v", err)
+	}
+	if length != room.cfg.StreamMaxLen {
+		t.Fatalf("stream length = %d, want %d", length, room.cfg.StreamMaxLen)
+	}
+}
+
 func TestScratchpadRoundTrip(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

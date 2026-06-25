@@ -37,7 +37,7 @@ func (r *Room) Publish(ctx context.Context, ev *Event) error {
 		ev.Timestamp = time.Now().UnixNano()
 	}
 	pipe := r.rdb.Pipeline()
-	add := pipe.XAdd(ctx, &redis.XAddArgs{
+	args := &redis.XAddArgs{
 		Stream: r.cfg.StreamKey(),
 		Values: map[string]any{
 			"type":      ev.Type,
@@ -47,7 +47,16 @@ func (r *Room) Publish(ctx context.Context, ev *Event) error {
 			"payload":   []byte(ev.Payload),
 			"timestamp": ev.Timestamp,
 		},
-	})
+	}
+	if r.cfg.StreamMaxLen > 0 {
+		args = &redis.XAddArgs{
+			Stream: r.cfg.StreamKey(),
+			MaxLen: r.cfg.StreamMaxLen,
+			Approx: true, // MAXLEN ~ N: cheap trimming, bounds even Persist'd lobby/welcome streams
+			Values: args.Values,
+		}
+	}
+	add := pipe.XAdd(ctx, args)
 	if r.cfg.StreamTTL > 0 {
 		pipe.Expire(ctx, r.cfg.StreamKey(), r.cfg.StreamTTL)
 	}
