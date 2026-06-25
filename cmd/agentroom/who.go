@@ -67,22 +67,28 @@ func whoLines(pres map[string]agentroom.PresenceEntry, selfID string, claimsFor 
 	sort.Strings(ids)
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
-		e := pres[id]
-		desc := e.Desc
-		if desc == "" {
-			desc = "(no role posted)"
-		}
-		line := fmt.Sprintf("%-*s  %s", width, id, desc)
-		if n := claimsFor(id); n > 0 {
-			line += fmt.Sprintf("  (%d claimed)", n)
-		}
-		line += fmt.Sprintf("  [%s left]", humanTTL(e.TTL))
-		if id == selfID {
-			line += "  (you)"
-		}
-		lines = append(lines, line)
+		lines = append(lines, whoLine(id, pres[id], width, claimsFor(id), id == selfID))
 	}
 	return lines
+}
+
+// whoLine renders one roster row: id left-padded to width, role/description
+// (or "(no role posted)" when blank), an optional claim count, the remaining
+// presence TTL, and a "(you)" tag when isSelf.
+func whoLine(id string, e agentroom.PresenceEntry, width, claims int, isSelf bool) string {
+	desc := e.Desc
+	if desc == "" {
+		desc = "(no role posted)"
+	}
+	line := fmt.Sprintf("%-*s  %s", width, id, desc)
+	if claims > 0 {
+		line += fmt.Sprintf("  (%d claimed)", claims)
+	}
+	line += fmt.Sprintf("  [%s left]", humanTTL(e.TTL))
+	if isSelf {
+		line += "  (you)"
+	}
+	return line
 }
 
 // humanTTL renders a presence key's remaining TTL compactly. Non-positive means
