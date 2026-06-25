@@ -107,6 +107,9 @@ func buildDigest(ctx context.Context, addr, repo, branch, selfID string) string 
 	defer func() { _ = rdb.Close() }()
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
+	defer cancel()
+
 	// Presence is liveness-backed: read the live TTL key set, not a fold of the
 	// event stream. Crashed agents drop within PresenceTTL with no SESSION_ENDED.
 	pres, err := local.Presence(ctx)
@@ -147,6 +150,8 @@ func joinLobby(ctx context.Context, addr, repo, branch, sessionID string) {
 	if err != nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
+	defer cancel()
 	_ = lobby.Publish(ctx, &agentroom.Event{
 		Type:    "AGENT_JOINED",
 		AgentID: shortSession(sessionID),
@@ -162,6 +167,8 @@ func writeLocalHeartbeat(ctx context.Context, addr, repo, branch, agentID string
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
+	defer cancel()
 	writeHeartbeat(ctx, local, agentID, "")
 }
 
@@ -221,12 +228,14 @@ func sessionEnd(c *cobra.Command) error {
 	if err != nil {
 		return nil
 	}
-	_ = room.Publish(c.Context(), &agentroom.Event{
+	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
+	defer cancel()
+	_ = room.Publish(ctx, &agentroom.Event{
 		Type:    "SESSION_ENDED",
 		AgentID: shortSession(in.SessionID),
 		Payload: payload,
 	})
-	_ = room.ClearPresence(c.Context(), shortSession(in.SessionID))
+	_ = room.ClearPresence(ctx, shortSession(in.SessionID))
 	return nil
 }
 
@@ -310,7 +319,7 @@ func clip(s string, n int) string {
 }
 
 const (
-	hookReadTimeout = 2 * time.Second
+	hookOpTimeout = 2 * time.Second
 	maxDeltaEvents  = 20
 )
 
@@ -321,6 +330,8 @@ func seedCursor(ctx context.Context, addr, repo, branch, sessionID string) {
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
+	defer cancel()
 	cursor := joinCursor(ctx, room)
 	if cursor == "" {
 		return
@@ -357,7 +368,7 @@ func userPromptSubmit(c *cobra.Command) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(c.Context(), hookReadTimeout)
+	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
 	defer cancel()
 
 	rdb := newRedisClient(addr)
