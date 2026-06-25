@@ -276,25 +276,13 @@ func (r *Room) ClearPresence(ctx context.Context, agentID string) error {
 // reading each key. Expired keys are simply absent. This is the liveness-backed
 // replacement for folding AGENT_JOINED/SESSION_ENDED off the event stream.
 func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
-	prefix := r.cfg.PresencePrefix()
-	out := make(map[string]string)
-	iter := r.rdb.Scan(ctx, 0, prefix+"*", 0).Iterator()
-	for iter.Next(ctx) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		key := iter.Val()
-		desc, err := r.rdb.Get(ctx, key).Result()
-		if errors.Is(err, redis.Nil) {
-			continue // key expired between SCAN and GET — not present
-		}
-		if err != nil {
-			return nil, fmt.Errorf("agentroom: read presence %s: %w", key, err)
-		}
-		out[strings.TrimPrefix(key, prefix)] = desc
+	entries, err := r.presenceScan(ctx, false)
+	if err != nil {
+		return nil, err
 	}
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("agentroom: scan presence: %w", err)
+	out := make(map[string]string, len(entries))
+	for id, e := range entries {
+		out[id] = e.Desc
 	}
 	return out, nil
 }
@@ -313,6 +301,15 @@ type PresenceEntry struct {
 // reads PTTL per key. Keys that expire mid-scan are skipped. Kept separate from
 // Presence so the per-prompt digest path stays a single GET per key.
 func (r *Room) PresenceDetailed(ctx context.Context) (map[string]PresenceEntry, error) {
+	return r.presenceScan(ctx, true)
+}
+
+// presenceScan is the shared SCAN-and-read behind Presence and PresenceDetailed:
+// it walks the room's presence prefix (cursor-based, never KEYS), reads each
+// key's description, and — only when withTTL — adds a PTTL round-trip so the hot
+// digest path (withTTL=false) stays a single GET per key. Keys that expire
+// between SCAN and GET are skipped.
+func (r *Room) presenceScan(ctx context.Context, withTTL bool) (map[string]PresenceEntry, error) {
 	prefix := r.cfg.PresencePrefix()
 	out := make(map[string]PresenceEntry)
 	iter := r.rdb.Scan(ctx, 0, prefix+"*", 0).Iterator()
@@ -323,19 +320,23 @@ func (r *Room) PresenceDetailed(ctx context.Context) (map[string]PresenceEntry, 
 		key := iter.Val()
 		desc, err := r.rdb.Get(ctx, key).Result()
 		if errors.Is(err, redis.Nil) {
-			continue // expired between SCAN and GET
+			continue // key expired between SCAN and GET — not present
 		}
 		if err != nil {
 			return nil, fmt.Errorf("agentroom: read presence %s: %w", key, err)
 		}
-		ttl, err := r.rdb.PTTL(ctx, key).Result()
-		if err != nil {
-			return nil, fmt.Errorf("agentroom: ttl presence %s: %w", key, err)
+		entry := PresenceEntry{Desc: desc}
+		if withTTL {
+			ttl, err := r.rdb.PTTL(ctx, key).Result()
+			if err != nil {
+				return nil, fmt.Errorf("agentroom: ttl presence %s: %w", key, err)
+			}
+			entry.TTL = ttl
 		}
-		out[strings.TrimPrefix(key, prefix)] = PresenceEntry{Desc: desc, TTL: ttl}
+		out[strings.TrimPrefix(key, prefix)] = entry
 	}
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("agentroom: scan presence detailed: %w", err)
+		return nil, fmt.Errorf("agentroom: scan presence: %w", err)
 	}
 	return out, nil
 }
