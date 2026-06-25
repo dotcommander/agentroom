@@ -175,15 +175,12 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 
 	var open []Task
 	for _, candidate := range candidates {
-		if _, err := candidate.done.Result(); err == nil {
-			continue
-		} else if !errors.Is(err, redis.Nil) {
-			return nil, fmt.Errorf("agentroom: task state %s: %w", candidate.msg.ID, err)
+		stillOpen, err := candidateOpen(candidate.done, candidate.owner, candidate.msg.ID)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := candidate.owner.Result(); err == nil {
+		if !stillOpen {
 			continue
-		} else if !errors.Is(err, redis.Nil) {
-			return nil, fmt.Errorf("agentroom: task state %s: %w", candidate.msg.ID, err)
 		}
 		typ := stringField(candidate.msg.Values, "type")
 		task := Task{ID: candidate.msg.ID, Type: typ}
@@ -193,6 +190,23 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 		open = append(open, task)
 	}
 	return open, nil
+}
+
+// candidateOpen reports whether a pipelined task is still open: a redis.Nil on
+// both its done-marker and owner-lease keys means neither completed nor claimed.
+// A present value on either short-circuits to closed; any non-Nil error fails.
+func candidateOpen(done, owner *redis.StringCmd, id string) (bool, error) {
+	if _, err := done.Result(); err == nil {
+		return false, nil
+	} else if !errors.Is(err, redis.Nil) {
+		return false, fmt.Errorf("agentroom: task state %s: %w", id, err)
+	}
+	if _, err := owner.Result(); err == nil {
+		return false, nil
+	} else if !errors.Is(err, redis.Nil) {
+		return false, fmt.Errorf("agentroom: task state %s: %w", id, err)
+	}
+	return true, nil
 }
 
 // OutstandingClaims counts the tasks agentID currently holds a claim on but has
