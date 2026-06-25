@@ -32,6 +32,7 @@ type Config struct {
 	StreamTTL        time.Duration // stream auto-expires this long after the last publish
 	StreamMaxLen     int64         // approximate XADD MAXLEN cap; <=0 disables (applies even to persisted/no-TTL streams)
 	ArchiveThreshold int64         // stream length that triggers compaction
+	SweepInterval    time.Duration // how often agentroomd re-runs the archive sweep
 	Group            string        // consumer-group name for Runtime delivery
 	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
 	CursorTTL        time.Duration // per-session read-cursor key auto-expires this long after the last refresh; a lost/expired cursor simply re-baselines to the stream tail
@@ -50,6 +51,7 @@ func DefaultConfig() Config {
 		StreamTTL:        48 * time.Hour,
 		StreamMaxLen:     10000,
 		ArchiveThreshold: 10000,
+		SweepInterval:    24 * time.Hour,
 		Group:            defaultGroup,
 		PresenceTTL:      15 * time.Minute,
 		CursorTTL:        24 * time.Hour,

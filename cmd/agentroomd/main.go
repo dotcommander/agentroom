@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/dotcommander/agentchat/agentroom"
 	"github.com/redis/go-redis/v9"
@@ -68,9 +69,25 @@ func main() {
 		logger.Info("archived", "stream", key, "count", len(events))
 		return nil
 	})
-	if err := archiver.RunDailySweep(ctx); err != nil {
-		logger.Error("sweep failed", "err", err)
-	}
+	// Sweep once at startup, then on each interval. Goroutine exits on ctx.Done().
+	go func() {
+		runSweep := func() {
+			if err := archiver.RunDailySweep(ctx); err != nil {
+				logger.Error("sweep failed", "err", err)
+			}
+		}
+		runSweep()
+		ticker := time.NewTicker(cfg.SweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runSweep()
+			}
+		}
+	}()
 
 	logger.Info("agentroomd running; press Ctrl-C to stop")
 	<-ctx.Done()
