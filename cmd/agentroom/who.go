@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -42,29 +41,18 @@ func whoCmd() *cobra.Command {
 // presence TTL before it drops. Ids are column-aligned and sorted; the caller's
 // own id is tagged "(you)".
 func whoLines(pres map[string]agentroom.PresenceEntry, selfID string, claimsFor func(string) int) []string {
-	all := make([]string, 0, len(pres))
-	for id := range pres {
-		all = append(all, id)
+	ids := visibleRosterIDs(pres, func(id string, e agentroom.PresenceEntry) bool {
+		return isAnonymousIdle(id, e.Desc)
+	})
+	if len(ids) == 0 {
+		return []string{"(nobody here)"}
 	}
-	redundant := redundantSessionKeys(all)
-	ids := make([]string, 0, len(pres))
 	width := 0
-	for id := range pres {
-		if isAnonymousIdle(id, pres[id].Desc) {
-			continue // hide role-less default-"cli" markers: clutter, no role/event backing
-		}
-		if _, dup := redundant[id]; dup {
-			continue // bare session key collapsed into its named "<handle>-<token>" entry
-		}
-		ids = append(ids, id)
+	for _, id := range ids {
 		if len(id) > width {
 			width = len(id)
 		}
 	}
-	if len(ids) == 0 {
-		return []string{"(nobody here)"}
-	}
-	sort.Strings(ids)
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
 		lines = append(lines, whoLine(id, pres[id], width, claimsFor(id), id == selfID))

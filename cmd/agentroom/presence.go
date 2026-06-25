@@ -53,7 +53,13 @@ func redundantSessionKeys(ids []string) map[string]struct{} {
 	return redundant
 }
 
-func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID string) int) []string {
+// visibleRosterIDs returns the sorted agent ids to show in a roster: every key
+// in pres except those skip reports (the caller's own id, or anonymous-idle
+// markers) and the bare session keys collapsed into a named "<handle>-<token>"
+// entry. It is the shared selection behind both the SessionStart digest
+// (presenceLines) and the `who` command (whoLines), so the dedup/sort policy
+// lives in one place instead of drifting between two copies.
+func visibleRosterIDs[V any](pres map[string]V, skip func(id string, v V) bool) []string {
 	all := make([]string, 0, len(pres))
 	for id := range pres {
 		all = append(all, id)
@@ -61,7 +67,7 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 	redundant := redundantSessionKeys(all)
 	ids := make([]string, 0, len(pres))
 	for id := range pres {
-		if id == selfID {
+		if skip(id, pres[id]) {
 			continue
 		}
 		if _, dup := redundant[id]; dup {
@@ -70,6 +76,11 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID string) int) []string {
+	ids := visibleRosterIDs(pres, func(id, _ string) bool { return id == selfID })
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
 		v := decodePresence(pres[id])
