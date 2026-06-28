@@ -57,6 +57,7 @@ func sessionStart(c *cobra.Command) error {
 	joinLobby(c.Context(), rdb, addr, repo, branch, in.SessionID)
 	writeLocalHeartbeat(c.Context(), rdb, addr, repo, branch, selfID)
 	seedCursor(c.Context(), rdb, addr, repo, branch, in.SessionID)
+	seedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
 	digest := buildDigest(c.Context(), rdb, addr, repo, branch, selfID)
 	if digest == "" {
 		return nil
@@ -309,14 +310,7 @@ const (
 // first UserPromptSubmit delta covers only events published after sign-in, never
 // the full backlog. Best-effort: never fails the session.
 func seedCursor(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
-	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
-	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
-	defer cancel()
-	cursor := joinCursor(ctx, room)
-	if cursor == "" {
-		return
-	}
-	_ = room.WriteCursor(ctx, sessionID, cursor, room.Config().CursorTTL)
+	seedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(addr, repo, branch)), sessionID)
 }
 
 // joinCursor picks a new session's initial read cursor: replay the last
@@ -347,6 +341,7 @@ func userPromptSubmit(c *cobra.Command) error {
 	if in.SessionID == "" {
 		return nil
 	}
+	selfID := shortSession(in.SessionID)
 
 	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
 	defer cancel()
@@ -354,34 +349,29 @@ func userPromptSubmit(c *cobra.Command) error {
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
-	writeHeartbeat(ctx, room, shortSession(in.SessionID), "")
+	writeHeartbeat(ctx, room, selfID, "")
 	// Keep any "<handle>-<token>" named entry for this session live too, so it
 	// does not expire while only the anonymous session line is refreshed.
-	_ = room.RefreshSessionPresence(ctx, shortSession(in.SessionID), room.Config().PresenceTTL)
+	_ = room.RefreshSessionPresence(ctx, selfID, room.Config().PresenceTTL)
 
-	cursor, err := room.ReadCursor(ctx, in.SessionID)
-	if err != nil {
+	// Compose this room's delta with the cross-repo lobby delta. Each section is
+	// independent: a quiet local room no longer suppresses cross-repo signal, and
+	// the local section is unchanged (deltaDigest) when present.
+	sections := make([]string, 0, 2)
+	if s := localDelta(ctx, room, in.SessionID, repo, branch); s != "" {
+		sections = append(sections, s)
+	}
+	if s := lobbyDelta(ctx, rdb, addr, repo, branch, in.SessionID, selfID); s != "" {
+		sections = append(sections, s)
+	}
+	if len(sections) == 0 {
 		return nil
 	}
-	if cursor == "" {
-		// No cursor yet (session-start seed missed, e.g. redis was down then):
-		// seed the join cursor (replay-recent, or tail when replay is disabled)
-		// so a recovered session still catches a peer's just-landed events.
-		if c := joinCursor(ctx, room); c != "" {
-			_ = room.WriteCursor(ctx, in.SessionID, c, room.Config().CursorTTL)
-		}
-		return nil
-	}
-	events, err := room.Since(ctx, cursor, maxDeltaEvents)
-	if err != nil || len(events) == 0 {
-		return nil
-	}
-	_ = room.WriteCursor(ctx, in.SessionID, events[len(events)-1].ID, room.Config().CursorTTL)
 
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":     "UserPromptSubmit",
-			"additionalContext": deltaDigest(repo, branch, events),
+			"additionalContext": strings.Join(sections, "\n\n"),
 		},
 	}
 	data, err := json.Marshal(out)
