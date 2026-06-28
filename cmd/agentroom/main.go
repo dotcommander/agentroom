@@ -149,11 +149,12 @@ func postCmd() *cobra.Command {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
 			agent := resolveAgent(c)
+			to, _ := c.Flags().GetString("to")
 			var payload []byte
 			if len(args) == 2 {
 				payload = []byte(args[1])
 			}
-			ev := &agentroom.Event{Type: args[0], AgentID: agent, Payload: payload}
+			ev := &agentroom.Event{Type: args[0], AgentID: agent, To: to, Payload: payload}
 			if err := room.Publish(c.Context(), ev); err != nil {
 				return err
 			}
@@ -165,6 +166,7 @@ func postCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("agent", defaultAgent(), "agent id to attribute the event to")
+	cmd.Flags().String("to", "", `directed recipient: a room key "repo:branch" or an agent handle (empty = broadcast)`)
 	return cmd
 }
 
