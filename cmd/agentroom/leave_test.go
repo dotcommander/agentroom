@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -27,13 +28,15 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 	t.Cleanup(func() { newRedisClient = orig })
 
 	ctx := context.Background()
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
 	const agent = "qa-leave"
 	qAgent := qualifyAgent(agent) // CLI qualifies --agent; presence key carries the session token
 
 	// Seed presence via Heartbeat, matching the mechanism the integration
 	// test uses for post-driven presence.
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	cfg := roomCfg(mr.Addr(), defaultRepo(), "main")
+	cfg := roomCfg(mr.Addr(), repo, branch)
 	room := agentroom.NewRoom(rdb, cfg)
 	if err := room.Heartbeat(ctx, qAgent, "tester", cfg.PresenceTTL); err != nil {
 		t.Fatalf("seed heartbeat: %v", err)
@@ -42,7 +45,7 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 
 	// Assert agent is present before leave.
 	rdb2 := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	room2 := agentroom.NewRoom(rdb2, roomCfg(mr.Addr(), defaultRepo(), "main"))
+	room2 := agentroom.NewRoom(rdb2, roomCfg(mr.Addr(), repo, branch))
 	pres, err := room2.Presence(ctx)
 	if err != nil {
 		t.Fatalf("presence before leave: %v", err)
@@ -59,7 +62,7 @@ func TestLeaveCmdClearsPresence(t *testing.T) {
 
 	// Assert agent is gone from presence.
 	rdb3 := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	room3 := agentroom.NewRoom(rdb3, roomCfg(mr.Addr(), defaultRepo(), "main"))
+	room3 := agentroom.NewRoom(rdb3, roomCfg(mr.Addr(), repo, branch))
 	pres, err = room3.Presence(ctx)
 	if err != nil {
 		t.Fatalf("presence after leave: %v", err)

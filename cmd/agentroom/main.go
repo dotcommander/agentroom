@@ -87,6 +87,21 @@ func roomFromFlags(cmd *cobra.Command) (*agentroom.Room, *redis.Client) {
 	addr, _ := cmd.Flags().GetString("addr")
 	repo, _ := cmd.Flags().GetString("repo")
 	branch, _ := cmd.Flags().GetString("branch")
+	// Resolve git-aware room identity lazily — never at flag registration, so
+	// --help/completion stay offline (only real room commands reach here).
+	// Explicit --repo/--branch always win; the registered default
+	// (defaultRepo/"main") remains the fallback when git/cwd are unavailable.
+	if !cmd.Flags().Changed("repo") || !cmd.Flags().Changed("branch") {
+		if wd, _ := os.Getwd(); wd != "" {
+			gitRepo, gitBranch := resolveRoom(cmd.Context(), wd)
+			if !cmd.Flags().Changed("repo") {
+				repo = gitRepo
+			}
+			if !cmd.Flags().Changed("branch") {
+				branch = gitBranch
+			}
+		}
+	}
 	cfg := agentroom.DefaultConfig()
 	cfg.RedisAddr = addr
 	cfg.RepoID = repo
@@ -129,7 +144,7 @@ func postCmd() *cobra.Command {
 			"Rooms are repo/branch-scoped. To reach the shared global lobby every agent\n" +
 			"sees regardless of repo (e.g. cross-repo announcements), target it explicitly\n" +
 			"with --repo lobby: agentroom post ANNOUNCEMENT '{...}' --repo lobby --agent <handle>.",
-		Args:  cobra.RangeArgs(1, 2),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(c *cobra.Command, args []string) error {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()

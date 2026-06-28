@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -51,7 +50,7 @@ func sessionStart(c *cobra.Command) error {
 	if in.SessionID == "" {
 		return nil
 	}
-	repo, branch := resolveRoom(in.CWD)
+	repo, branch := resolveRoom(c.Context(), in.CWD)
 	selfID := shortSession(in.SessionID)
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
@@ -85,20 +84,6 @@ func readSessionInput() sessionStartInput {
 		in.CWD, _ = os.Getwd()
 	}
 	return in
-}
-
-// resolveRoom picks the room namespace: REPO_ID/BRANCH_NAME env win, else the
-// cwd's basename and "main".
-func resolveRoom(cwd string) (string, string) {
-	repo := os.Getenv("REPO_ID")
-	if repo == "" {
-		repo = filepath.Base(cwd)
-	}
-	branch := os.Getenv("BRANCH_NAME")
-	if branch == "" {
-		branch = defaultBranch
-	}
-	return repo, branch
 }
 
 // buildDigest reports who is currently present in the local room (live, from TTL
@@ -210,7 +195,7 @@ func sessionEnd(c *cobra.Command) error {
 	if in.SessionID == "" {
 		return nil
 	}
-	repo, branch := resolveRoom(in.CWD)
+	repo, branch := resolveRoom(c.Context(), in.CWD)
 	ask, entries := transcriptSummary(in.TranscriptPath)
 
 	rdb := newRedisClient(addr)
@@ -358,7 +343,7 @@ func joinCursor(ctx context.Context, room *agentroom.Room) string {
 func userPromptSubmit(c *cobra.Command) error {
 	addr, _ := c.Flags().GetString("addr")
 	in := readSessionInput()
-	repo, branch := resolveRoom(in.CWD)
+	repo, branch := resolveRoom(c.Context(), in.CWD)
 	if in.SessionID == "" {
 		return nil
 	}

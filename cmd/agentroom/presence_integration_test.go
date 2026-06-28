@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -56,7 +57,9 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	// A direct Room view over the same miniredis to assert presence state.
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	cfg := roomCfg(mr.Addr(), defaultRepo(), "main")
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	cfg := roomCfg(mr.Addr(), repo, branch)
 	room := agentroom.NewRoom(rdb, cfg)
 
 	pres, err := room.Presence(ctx)
@@ -132,7 +135,9 @@ func TestClaimCountRendersAcrossCLI(t *testing.T) {
 	// the render-time claims counter over the same room.
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), defaultRepo(), "main"))
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
 
 	pres, err := room.Presence(ctx)
 	if err != nil {
