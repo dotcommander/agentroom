@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func TestHeartbeatWritesPresenceKey(t *testing.T) {
@@ -221,10 +223,16 @@ func TestPresenceErrorsOnGetFailure(t *testing.T) {
 	room, mr := newTestRoom(t)
 	ctx := context.Background()
 
-	// Poison a key under the presence prefix with the WRONG type (a hash):
-	// SCAN still returns it, but GET returns a non-Nil WRONGTYPE error, which
-	// isolates the GET-error branch (not the SCAN/iter.Err path).
+	// Poison an indexed presence key with the WRONG type (a hash): the roster
+	// index still returns it, but GET returns a non-Nil WRONGTYPE error, which
+	// isolates the GET-error branch.
 	mr.HSet(room.cfg.PresenceKey("poison"), "field", "value")
+	if err := room.rdb.ZAdd(ctx, room.cfg.PresenceIndexKey(), redis.Z{
+		Score:  presenceExpiryScore(time.Minute),
+		Member: "poison",
+	}).Err(); err != nil {
+		t.Fatalf("index poison: %v", err)
+	}
 
 	_, err := room.Presence(ctx)
 	if err == nil {

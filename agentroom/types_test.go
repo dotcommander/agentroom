@@ -126,6 +126,15 @@ func TestEventJSONRoundTrip(t *testing.T) {
 func TestConfigCatalogAndTaskKeys(t *testing.T) {
 	t.Parallel()
 	cfg := Config{RepoID: "svc", BranchName: "dev"}
+	if got, want := cfg.PresencePrefix(), "repo:svc:dev:presence:"; got != want {
+		t.Errorf("PresencePrefix() = %q, want %q", got, want)
+	}
+	if got, want := cfg.PresenceIndexKey(), "repo:svc:dev:presence:index"; got != want {
+		t.Errorf("PresenceIndexKey() = %q, want %q", got, want)
+	}
+	if got, want := cfg.PresenceKey("agentA"), "repo:svc:dev:presence:agentA"; got != want {
+		t.Errorf("PresenceKey() = %q, want %q", got, want)
+	}
 	if got, want := cfg.InboxKey("gary"), "repo:svc:dev:inbox:gary"; got != want {
 		t.Errorf("InboxKey() = %q, want %q", got, want)
 	}

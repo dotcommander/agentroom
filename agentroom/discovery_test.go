@@ -136,6 +136,30 @@ func TestOpenTasks(t *testing.T) {
 	}
 }
 
+func TestOpenTasksCapsScanCount(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	if err := room.RegisterTask(ctx, TaskDef{Type: evFailed, Description: "failed"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	for i := 0; i < maxOpenTaskScanCount+10; i++ {
+		if err := room.Publish(ctx, &Event{Type: evFailed, AgentID: "ci"}); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	open, err := room.OpenTasks(ctx, maxOpenTaskScanCount+10)
+	if err != nil {
+		t.Fatalf("open tasks: %v", err)
+	}
+	if len(open) != maxOpenTaskScanCount {
+		t.Fatalf("open tasks = %d, want cap %d", len(open), maxOpenTaskScanCount)
+	}
+}
+
 func TestOutstandingClaimsErrorsOnOutage(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

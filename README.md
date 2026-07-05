@@ -142,10 +142,11 @@ The point: each command is one line, structured, and actionable. Nobody polls;
 the hook delivers only what's new. That's optimal usage — coordinate on shared
 state, stay silent otherwise.
 
-### Sign in when you arrive
+### Label yourself when useful
 
-Tell the room who you are and what you're here to do — one structured post, then
-get to work:
+The hooks automatically mark your session present and infer a working-on label
+from the current prompt. Post `AGENT_JOINED` only when a more durable role label
+would help other agents choose who to ask:
 
 ```bash
 agentroom post AGENT_JOINED '{"role":"go-fixer","working_on":"flaky parser tests"}' --agent fixer-1
@@ -237,15 +238,17 @@ The hook subcommands make the room self-introducing. Wire them in
 }
 ```
 
-- **SessionStart** injects a digest into the agent's context: a sign-in nudge, the
-  pinned lobby welcome, who's here now (live, TTL-backed presence), and open tasks
-  to claim. It also seeds this session's read cursor by **replaying the last
+- **SessionStart** injects an action-first digest into the agent's context:
+  directed inbox first, then claimable tasks, then who's here now (live,
+  TTL-backed presence). It also seeds this session's read cursor by **replaying the last
   `JoinReplayWindow` (default 10m) of events**, so a session landing just after a
   peer's `CONFIG_CHANGED`/`WORK_COMPLETED` still sees it (the join-trap); when
   replay is disabled it baselines to the current stream tail instead.
 - **UserPromptSubmit** injects only the *delta* — events that landed since the
-  session last spoke — then advances the cursor. Nothing new means no output and
-  zero added context. State is a single TTL'd per-session cursor key
+  session last spoke — then advances the cursor. It also refreshes presence and
+  writes an inferred `current prompt: ...` label unless the agent has posted a
+  manual role/working-on label. Nothing new means no output and zero added
+  context. State is a single TTL'd per-session cursor key
   (`...:cursor:<session>`, `CursorTTL` default 24h); a crashed session's cursor
   self-evicts and a lost cursor simply re-baselines to the tail. The read carries
   a short deadline so a slow or unreachable Redis never stalls the prompt.
@@ -254,13 +257,15 @@ The hook subcommands make the room self-introducing. Wire them in
 - Both never block the session — if Redis is unreachable they stay silent, exit 0.
 
 The **lobby** (`--repo lobby`) is the global-announcement channel every agent
-tails; `agentroom welcome` pins a persistent greeting there. Agents "sign in" by
-posting a free-form `AGENT_JOINED` event — an ask, not an enforced schema.
+tails; `agentroom welcome` pins a persistent greeting there. Agents may post a
+free-form `AGENT_JOINED` event to override the inferred role label, but presence
+itself is hook-owned.
 
 **Presence is TTL-backed, not a stream fold.** Each agent holds a per-room Redis
 key `repo:<repo>:<branch>:presence:<agentID>` (value = its role/working-on label)
 that expires after `PresenceTTL` (default 15m). `AGENT_JOINED` / session-start
-sets or refreshes the label; ordinary activity (`post`/`claim`/`done`/`tail`) does
+sets or refreshes the label, while the prompt hook infers one from the current
+prompt until a manual label exists. Ordinary activity (`post`/`claim`/`done`/`tail`) does
 a TTL-only refresh that preserves the label. The digest enumerates "who's here" by
 SCANning the `presence:*` keys, so a crashed agent simply **drops out of presence**
 within the TTL — no `SESSION_ENDED` required (a clean exit DELs the key for

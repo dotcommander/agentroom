@@ -6,14 +6,14 @@ actually here and which one are they" — driven by field feedback from a peer a
 that used the mesh in a live session.
 
 ## Current state
-- ✅ **Handle collision fixed** (`31ce44f`, tests `a5059b6`). Manual CLI commands qualify `--agent <name>` → `<name>-<sessionToken>` once at flag-read time via `resolveAgent`→`qualifyAgent` (cmd/agentroom/main.go). Token = `shortSession(CLAUDE_SESSION_ID)` (8-char, same value the hook path derives), else `<host>-<ppid>` outside a Claude session. Handles sanitized of key/SCAN-breaking chars (`: * ? [ ]`, whitespace). Two agents picking `opus-pidrive` → `opus-pidrive-a1b2c3d4` vs `opus-pidrive-9f8e7d6c`, distinct across presence key, event attribution, and claim ownership.
-- ✅ **`agentroom who` command** (`21bfae6`, lib `a33c022`, tests `516350e`+`9dcef8f`). On-demand roster: per-agent role, claim load, and **TTL remaining**. Pure observer — does NOT heartbeat, so running it doesn't make you appear. Self tagged `(you)`. Backed by new lib method `Room.PresenceDetailed` (agentroom/room.go) returning `PresenceEntry{Desc, TTL}` (kept separate from hot-path `Presence` to avoid a per-key PTTL round-trip in the per-prompt digest).
+- ✅ **Handle collision fixed** (`31ce44f`, tests `a5059b6`). Manual CLI commands qualify `--agent <name>` → `<name>-<sessionToken>` once at flag-read time via `resolveAgent`→`qualifyAgent` (cmd/agentroom/main.go). Token = `shortSession(CLAUDE_SESSION_ID)` (8-char, same value the hook path derives), else `<host>-<ppid>` outside a Claude session. Handles sanitized of key-breaking chars (`:`, whitespace). Two agents picking `opus-pidrive` → `opus-pidrive-a1b2c3d4` vs `opus-pidrive-9f8e7d6c`, distinct across presence key, event attribution, and claim ownership.
+- ✅ **`agentroom who` command** (`21bfae6`, lib `a33c022`, tests `516350e`+`9dcef8f`). On-demand roster: per-agent role, claim load, and **TTL remaining**. Pure observer — does NOT heartbeat, so running it doesn't make you appear. Self tagged `(you)`. Backed by new lib method `Room.PresenceDetailed` (agentroom/room.go) returning `PresenceEntry{Desc, TTL}` (kept separate from hot-path `Presence` to avoid TTL reads in the per-prompt digest).
 - ✅ **Blank presence bodies render legibly** — `who` shows `(no role posted)` instead of nothing for heartbeat-only/hook entries (render-layer fix; storage model unchanged — empty desc is by-design).
 - ✅ **Docs fix** (`e188480`) — digest no longer says `tail` "watches the feed" (it's one-shot → "print recent events"); `who` documented in digest + README command table.
 - ✅ **Verified**: `go build ./...` clean, `go vet ./...` clean, `go test ./...` → 82 passed (3 pkgs), `agentroom who` confirmed in `--help`. Tree clean (all committed).
 
 ## Invariants
-- `Presence` (hot per-prompt digest path) must stay one GET per key — do NOT add the PTTL round-trip to it; that's why `PresenceDetailed` is separate.
+- `Presence` (hot per-prompt digest path) must enumerate via the per-room presence index and batch description reads only — do NOT add TTL reads to it; that's why `PresenceDetailed` is separate.
 - Handle qualification must produce the SAME identity for all sinks of one command (presence/event/claim) — keep it at the single `resolveAgent` chokepoint, never re-derive per-sink.
 - `who` must remain a pure observer (no heartbeat write) — looking must not create presence.
 - Qualification falls back to `<host>-<ppid>` when `CLAUDE_SESSION_ID` is absent — never regress plain-terminal use to an unqualified bare handle.
