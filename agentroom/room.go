@@ -33,6 +33,9 @@ func (r *Room) Config() Config {
 // stream's idle-expiry lease (the stream auto-expires cfg.StreamTTL after the
 // last publish). The stream-assigned entry ID is written back to ev.ID.
 func (r *Room) Publish(ctx context.Context, ev *Event) error {
+	if r.cfg.MaxPayloadBytes > 0 && int64(len(ev.Payload)) > r.cfg.MaxPayloadBytes {
+		return fmt.Errorf("agentroom: payload is %d bytes, max %d bytes", len(ev.Payload), r.cfg.MaxPayloadBytes)
+	}
 	if ev.Timestamp == 0 {
 		ev.Timestamp = time.Now().UnixNano()
 	}
@@ -84,6 +87,131 @@ func (r *Room) ReadScratchpad(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("agentroom: read scratchpad %s: %w", key, err)
 	}
 	return b, nil
+}
+
+// EventByID returns the exact stream event id when it still exists in the room
+// stream. The bool is false when the id is absent, expired, or trimmed.
+func (r *Room) EventByID(ctx context.Context, id string) (Event, bool, error) {
+	msgs, err := r.rdb.XRangeN(ctx, r.cfg.StreamKey(), id, id, 1).Result()
+	if err != nil {
+		return Event{}, false, fmt.Errorf("agentroom: event %s: %w", id, err)
+	}
+	if len(msgs) == 0 {
+		return Event{}, false, nil
+	}
+	return decodeEvent(msgs[0]), true, nil
+}
+
+// BeginAsk creates the singleton blocking-ask lease for agentID with token. It
+// returns false when the agent already has an outstanding ask in this room.
+func (r *Room) BeginAsk(ctx context.Context, agentID, token string, ttl time.Duration) (bool, error) {
+	ok, err := r.rdb.SetNX(ctx, r.cfg.PendingAskKey(agentID), token, ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("agentroom: begin ask %s: %w", agentID, err)
+	}
+	return ok, nil
+}
+
+var endAskScript = redis.NewScript(`
+if redis.call('get', KEYS[1]) == ARGV[1] then
+	return redis.call('del', KEYS[1])
+end
+return 0
+`)
+
+// EndAsk clears agentID's singleton blocking-ask lease only when it still points
+// at token, so an expired-and-replaced lease is not deleted by a stale waiter.
+func (r *Room) EndAsk(ctx context.Context, agentID, token string) error {
+	if err := endAskScript.Run(ctx, r.rdb, []string{r.cfg.PendingAskKey(agentID)}, token).Err(); err != nil {
+		return fmt.Errorf("agentroom: end ask %s: %w", agentID, err)
+	}
+	return nil
+}
+
+// EnqueueInbox writes ev to recipient's durable directed inbox. The normal room
+// stream remains the source of global ordering; source_id ties this inbox copy
+// back to the room entry for dedupe during hook injection.
+func (r *Room) EnqueueInbox(ctx context.Context, recipient string, ev Event) error {
+	if recipient == "" {
+		return nil
+	}
+	args := &redis.XAddArgs{
+		Stream: r.cfg.InboxKey(recipient),
+		Values: map[string]any{
+			"source_stream": r.cfg.StreamKey(),
+			"source_id":     ev.ID,
+			"type":          ev.Type,
+			"agent_id":      ev.AgentID,
+			"to":            ev.To,
+			"reply_to":      ev.ReplyTo,
+			"payload":       []byte(ev.Payload),
+			"timestamp":     ev.Timestamp,
+		},
+	}
+	if r.cfg.InboxMaxLen > 0 {
+		args.MaxLen = r.cfg.InboxMaxLen
+		args.Approx = true
+	}
+	pipe := r.rdb.Pipeline()
+	pipe.XAdd(ctx, args)
+	if r.cfg.InboxTTL > 0 {
+		pipe.Expire(ctx, r.cfg.InboxKey(recipient), r.cfg.InboxTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("agentroom: enqueue inbox %s: %w", recipient, err)
+	}
+	return nil
+}
+
+// InboxSince returns up to count durable directed inbox entries strictly after
+// cursor. A missing cursor starts from 0-0, unlike room-stream session cursors,
+// so offline messages are delivered instead of baselining to the stream tail.
+func (r *Room) InboxSince(ctx context.Context, recipient, cursor string, count int64) ([]InboxEvent, error) {
+	if recipient == "" {
+		return nil, nil
+	}
+	if cursor == "" {
+		cursor = streamStartID
+	}
+	if count <= 0 {
+		count = 1
+	}
+	msgs, err := r.rdb.XRangeN(ctx, r.cfg.InboxKey(recipient), cursor, "+", count+1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("agentroom: inbox since %s: %w", recipient, err)
+	}
+	events := make([]InboxEvent, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.ID == cursor {
+			continue
+		}
+		events = append(events, decodeInboxEvent(msg))
+	}
+	if int64(len(events)) > count {
+		events = events[:count]
+	}
+	return events, nil
+}
+
+// ReadInboxCursor returns the last delivered inbox entry ID for recipient, or ""
+// when no cursor exists yet.
+func (r *Room) ReadInboxCursor(ctx context.Context, recipient string) (string, error) {
+	id, err := r.rdb.Get(ctx, r.cfg.InboxCursorKey(recipient)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("agentroom: read inbox cursor %s: %w", recipient, err)
+	}
+	return id, nil
+}
+
+// WriteInboxCursor stores the last delivered inbox entry ID for recipient.
+func (r *Room) WriteInboxCursor(ctx context.Context, recipient, id string, ttl time.Duration) error {
+	if err := r.rdb.Set(ctx, r.cfg.InboxCursorKey(recipient), id, ttl).Err(); err != nil {
+		return fmt.Errorf("agentroom: write inbox cursor %s: %w", recipient, err)
+	}
+	return nil
 }
 
 // directedScanWindow bounds how far back Directed scans for messages addressed
@@ -156,6 +284,38 @@ func (r *Room) Since(ctx context.Context, lastID string, count int64) ([]Event, 
 	return events, nil
 }
 
+// Wait blocks until the stream has entries after lastID, then returns them in
+// chronological order. It is an interactive/read-only primitive, not a consumer
+// group read: it does not claim or ack entries, so it cannot interfere with
+// Runtime/agentroomd delivery. A Redis block timeout returns no events and no
+// error; context cancellation or deadline expiry returns the context error.
+func (r *Room) Wait(ctx context.Context, lastID string, block time.Duration, count int64) ([]Event, error) {
+	if lastID == "" {
+		lastID = "$"
+	}
+	if count <= 0 {
+		count = 1
+	}
+	res, err := r.rdb.XRead(ctx, &redis.XReadArgs{
+		Streams: []string{r.cfg.StreamKey(), lastID},
+		Count:   count,
+		Block:   block,
+	}).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("agentroom: wait after %s: %w", lastID, err)
+	}
+	var events []Event
+	for _, st := range res {
+		for _, msg := range st.Messages {
+			events = append(events, decodeEvent(msg))
+		}
+	}
+	return events, nil
+}
+
 // LastID returns the stream's most recent entry ID, or "0-0" when the stream is
 // empty. It seeds a session's read cursor so the first delta read covers only
 // events published after the cursor was set (never the full history).
@@ -165,7 +325,7 @@ func (r *Room) LastID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("agentroom: last id: %w", err)
 	}
 	if len(msgs) == 0 {
-		return "0-0", nil
+		return streamStartID, nil
 	}
 	return msgs[0].ID, nil
 }
@@ -339,4 +499,13 @@ func (r *Room) presenceScan(ctx context.Context, withTTL bool) (map[string]Prese
 		return nil, fmt.Errorf("agentroom: scan presence: %w", err)
 	}
 	return out, nil
+}
+
+func decodeInboxEvent(msg redis.XMessage) InboxEvent {
+	return InboxEvent{
+		ID:           msg.ID,
+		SourceStream: stringField(msg.Values, "source_stream"),
+		SourceID:     stringField(msg.Values, "source_id"),
+		Event:        decodeEvent(msg),
+	}
 }

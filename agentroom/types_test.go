@@ -84,6 +84,18 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ArchiveThreshold != 10000 {
 		t.Errorf("ArchiveThreshold = %d, want 10000", cfg.ArchiveThreshold)
 	}
+	if cfg.MaxPayloadBytes != 16*1024 {
+		t.Errorf("MaxPayloadBytes = %d, want 16384", cfg.MaxPayloadBytes)
+	}
+	if cfg.InboxMaxLen != 1000 {
+		t.Errorf("InboxMaxLen = %d, want 1000", cfg.InboxMaxLen)
+	}
+	if cfg.InboxTTL != 30*24*time.Hour {
+		t.Errorf("InboxTTL = %v, want 720h", cfg.InboxTTL)
+	}
+	if cfg.InboxCursorTTL != 30*24*time.Hour {
+		t.Errorf("InboxCursorTTL = %v, want 720h", cfg.InboxCursorTTL)
+	}
 	if cfg.Group != defaultGroup {
 		t.Errorf("Group = %q, want agents", cfg.Group)
 	}
@@ -114,6 +126,12 @@ func TestEventJSONRoundTrip(t *testing.T) {
 func TestConfigCatalogAndTaskKeys(t *testing.T) {
 	t.Parallel()
 	cfg := Config{RepoID: "svc", BranchName: "dev"}
+	if got, want := cfg.InboxKey("gary"), "repo:svc:dev:inbox:gary"; got != want {
+		t.Errorf("InboxKey() = %q, want %q", got, want)
+	}
+	if got, want := cfg.InboxCursorKey("gary"), "repo:svc:dev:inboxcursor:gary"; got != want {
+		t.Errorf("InboxCursorKey() = %q, want %q", got, want)
+	}
 	if got, want := cfg.CatalogKey(), "repo:svc:dev:catalog"; got != want {
 		t.Errorf("CatalogKey() = %q, want %q", got, want)
 	}

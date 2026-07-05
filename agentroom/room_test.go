@@ -85,6 +85,115 @@ func TestPublishBoundsStreamLength(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	room.cfg.MaxPayloadBytes = 4
+	ctx := context.Background()
+
+	err := room.Publish(ctx, &Event{Type: "BIG", AgentID: "engine-1", Payload: []byte("12345")})
+	if err == nil {
+		t.Fatal("publish succeeded, want oversized payload error")
+	}
+
+	length, xerr := room.rdb.XLen(ctx, room.cfg.StreamKey()).Result()
+	if xerr != nil {
+		t.Fatalf("xlen: %v", xerr)
+	}
+	if length != 0 {
+		t.Fatalf("stream length = %d, want 0", length)
+	}
+}
+
+func TestInboxRoundTripAndCursor(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	ev := &Event{Type: "MSG", AgentID: "alice", To: "gary", Payload: []byte(`{"m":1}`)}
+	if err := room.Publish(ctx, ev); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := room.EnqueueInbox(ctx, "gary", *ev); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+
+	got, err := room.InboxSince(ctx, "gary", "", 10)
+	if err != nil {
+		t.Fatalf("inbox since: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("inbox count = %d, want 1", len(got))
+	}
+	if got[0].SourceID != ev.ID {
+		t.Fatalf("SourceID = %q, want %q", got[0].SourceID, ev.ID)
+	}
+	if got[0].Event.Type != "MSG" || string(got[0].Event.Payload) != `{"m":1}` {
+		t.Fatalf("inbox event = %+v", got[0].Event)
+	}
+
+	if err := room.WriteInboxCursor(ctx, "gary", got[0].ID, time.Hour); err != nil {
+		t.Fatalf("write inbox cursor: %v", err)
+	}
+	cursor, err := room.ReadInboxCursor(ctx, "gary")
+	if err != nil {
+		t.Fatalf("read inbox cursor: %v", err)
+	}
+	if cursor != got[0].ID {
+		t.Fatalf("cursor = %q, want %q", cursor, got[0].ID)
+	}
+	again, err := room.InboxSince(ctx, "gary", cursor, 10)
+	if err != nil {
+		t.Fatalf("inbox since cursor: %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("inbox after cursor = %d, want 0", len(again))
+	}
+}
+
+func TestWaitReturnsNextEventWithoutConsumerGroup(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+	lastID, err := room.LastID(ctx)
+	if err != nil {
+		t.Fatalf("last id: %v", err)
+	}
+	got := make(chan []Event, 1)
+	errc := make(chan error, 1)
+	go func() {
+		events, err := room.Wait(ctx, lastID, 3*time.Second, 1)
+		if err != nil {
+			errc <- err
+			return
+		}
+		got <- events
+	}()
+
+	if err := room.Publish(ctx, &Event{Type: "PING", AgentID: "peer"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case err := <-errc:
+		t.Fatalf("wait error: %v", err)
+	case events := <-got:
+		if len(events) != 1 || events[0].Type != "PING" {
+			t.Fatalf("wait events = %+v, want one PING", events)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Wait")
+	}
+}
+
 func TestScratchpadRoundTrip(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

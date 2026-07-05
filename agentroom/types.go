@@ -31,6 +31,10 @@ type Config struct {
 	BranchName       string
 	StreamTTL        time.Duration // stream auto-expires this long after the last publish
 	StreamMaxLen     int64         // approximate XADD MAXLEN cap; <=0 disables (applies even to persisted/no-TTL streams)
+	MaxPayloadBytes  int64         // max Event.Payload size accepted by Publish; <=0 disables
+	InboxMaxLen      int64         // approximate per-recipient inbox stream cap; <=0 disables
+	InboxTTL         time.Duration // inbox stream auto-expires this long after the last enqueue
+	InboxCursorTTL   time.Duration // per-recipient inbox cursor expiry after last delivery
 	ArchiveThreshold int64         // stream length that triggers compaction
 	SweepInterval    time.Duration // how often agentroomd re-runs the archive sweep
 	Group            string        // consumer-group name for Runtime delivery
@@ -43,6 +47,8 @@ type Config struct {
 // unset; single source of truth for DefaultConfig and Runtime.group.
 const defaultGroup = "agents"
 
+const streamStartID = "0-0"
+
 // DefaultConfig returns the documented fallback tunables. This is the single
 // sanctioned home for these literals; callers override per environment.
 func DefaultConfig() Config {
@@ -50,6 +56,10 @@ func DefaultConfig() Config {
 		RedisAddr:        "localhost:6379",
 		StreamTTL:        48 * time.Hour,
 		StreamMaxLen:     10000,
+		MaxPayloadBytes:  16 * 1024,
+		InboxMaxLen:      1000,
+		InboxTTL:         30 * 24 * time.Hour,
+		InboxCursorTTL:   30 * 24 * time.Hour,
 		ArchiveThreshold: 10000,
 		SweepInterval:    24 * time.Hour,
 		Group:            defaultGroup,
@@ -97,6 +107,25 @@ func (c Config) CursorKey(sessionID string) string {
 	return c.roomPrefix() + ":cursor:" + sessionID
 }
 
+// InboxKey is the durable per-recipient stream for directed messages addressed
+// to recipient. Unlike the room stream cursor, inbox reads start at 0-0 when no
+// cursor exists so offline directed messages are not silently skipped.
+func (c Config) InboxKey(recipient string) string {
+	return c.roomPrefix() + ":inbox:" + recipient
+}
+
+// InboxCursorKey stores the last delivered entry ID for one recipient inbox.
+func (c Config) InboxCursorKey(recipient string) string {
+	return c.roomPrefix() + ":inboxcursor:" + recipient
+}
+
+// PendingAskKey is the singleton waiter lease for one asking agent. It prevents
+// one agent from starting multiple blocking asks in the same room and losing the
+// reply correlation contract.
+func (c Config) PendingAskKey(agentID string) string {
+	return c.roomPrefix() + ":ask:" + agentID
+}
+
 // CatalogKey is the Redis hash holding this room's self-describing task catalog
 // (task type -> TaskDef). Agents read it to discover what work the room knows.
 func (c Config) CatalogKey() string {
@@ -132,6 +161,16 @@ type Task struct {
 	ID      string          `json:"id"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
+}
+
+// InboxEvent is one durable recipient-inbox entry. ID is the inbox stream entry
+// ID; SourceID is the original room-stream entry ID for dedupe against normal
+// room deltas.
+type InboxEvent struct {
+	ID           string
+	SourceStream string
+	SourceID     string
+	Event        Event
 }
 
 // TaskStatus is the coordination state of a task: TaskOpen (claimable),
