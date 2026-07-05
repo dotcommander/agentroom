@@ -145,7 +145,7 @@ func resolveLiveTarget(ctx context.Context, room *agentroom.Room, raw string) (s
 	}
 }
 
-func waitForReply(ctx context.Context, room *agentroom.Room, askID, from, to string, timeout time.Duration) (agentroom.Event, error) {
+func waitForReply(ctx context.Context, room *agentroom.Room, askID, expectedSender, expectedRecipient string, timeout time.Duration) (agentroom.Event, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -162,7 +162,7 @@ func waitForReply(ctx context.Context, room *agentroom.Room, askID, from, to str
 		}
 		for _, ev := range events {
 			lastID = ev.ID
-			if ev.ReplyTo == askID && ev.AgentID == from && ev.To == to {
+			if ev.ReplyTo == askID && ev.AgentID == expectedSender && ev.To == expectedRecipient {
 				return ev, nil
 			}
 		}

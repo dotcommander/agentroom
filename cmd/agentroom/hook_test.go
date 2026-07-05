@@ -87,6 +87,12 @@ func TestHookSmallHelpers(t *testing.T) {
 	if got := shortSession(""); got != "session" {
 		t.Fatalf("shortSession empty = %q", got)
 	}
+	if got := inferredPresenceDesc("  refactor hook digest  "); got != "current prompt: refactor hook digest" {
+		t.Fatalf("inferredPresenceDesc = %q", got)
+	}
+	if got := inferredPresenceDesc("   "); got != "" {
+		t.Fatalf("blank inferredPresenceDesc = %q, want empty", got)
+	}
 }
 
 func TestTranscriptSummary(t *testing.T) {
@@ -251,13 +257,15 @@ func TestSessionStartEmitsDigestJSON(t *testing.T) {
 	}
 	for _, want := range []string{
 		"agentroom -- shared agent mesh",
-		"Sign in -- tell the room who you are",
+		"== claimable tasks ==",
 		"== who's here",
-		"== open tasks you could claim ==",
 	} {
 		if !strings.Contains(got.HookSpecificOutput.AdditionalContext, want) {
 			t.Fatalf("SessionStart context missing %q:\n%s", want, got.HookSpecificOutput.AdditionalContext)
 		}
+	}
+	if strings.Contains(got.HookSpecificOutput.AdditionalContext, "Sign in -- tell the room") {
+		t.Fatalf("SessionStart context still contains sign-in banner:\n%s", got.HookSpecificOutput.AdditionalContext)
 	}
 }
 
@@ -356,7 +364,7 @@ func TestUserPromptSubmitAdvancesLocalAndLobbyCursors(t *testing.T) {
 		t.Fatalf("publish lobby: %v", err)
 	}
 
-	if err := runCLIWithStdin(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "user-prompt-submit"); err != nil {
+	if err := runCLIWithStdin(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`","prompt":"fix the hook digest"}`, "hook", "user-prompt-submit"); err != nil {
 		t.Fatalf("user-prompt-submit: %v", err)
 	}
 	if cursor, err := local.ReadCursor(ctx, sessionID); err != nil || cursor != localEvent.ID {
@@ -369,8 +377,48 @@ func TestUserPromptSubmitAdvancesLocalAndLobbyCursors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("presence: %v", err)
 	}
-	if _, ok := pres[selfID]; !ok {
-		t.Fatalf("prompt submit did not refresh session presence: %v", pres)
+	if got := pres[selfID]; got != "current prompt: fix the hook digest" {
+		t.Fatalf("prompt submit presence = %q, want inferred prompt; all presence: %v", got, pres)
+	}
+}
+
+func TestWriteInferredPresencePreservesManualLabel(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	ctx := context.Background()
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "repo", "main"))
+	if err := room.Heartbeat(ctx, "sess1", "reviewer: parser", time.Minute); err != nil {
+		t.Fatalf("heartbeat manual: %v", err)
+	}
+	writeInferredPresence(ctx, room, "sess1", "new user prompt")
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	if got := pres["sess1"]; got != "reviewer: parser" {
+		t.Fatalf("manual presence overwritten: %q", got)
+	}
+
+	if err := room.Heartbeat(ctx, "sess2", "current prompt: old work", time.Minute); err != nil {
+		t.Fatalf("heartbeat inferred: %v", err)
+	}
+	writeInferredPresence(ctx, room, "sess2", "new work")
+	pres, err = room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence after inferred update: %v", err)
+	}
+	if got := pres["sess2"]; got != "current prompt: new work" {
+		t.Fatalf("inferred presence not updated: %q", got)
 	}
 }
 
@@ -560,6 +608,15 @@ func TestBuildDigestIncludesPresenceInboxAndOpenTasks(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("digest missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "Sign in -- tell the room") {
+		t.Fatalf("digest still contains sign-in banner:\n%s", got)
+	}
+	inboxAt := strings.Index(got, "1 directed message(s) for you")
+	tasksAt := strings.Index(got, "== claimable tasks ==")
+	rosterAt := strings.Index(got, "== who's here")
+	if inboxAt == -1 || tasksAt == -1 || rosterAt == -1 || !(inboxAt < tasksAt && tasksAt < rosterAt) {
+		t.Fatalf("digest order = inbox:%d tasks:%d roster:%d\n%s", inboxAt, tasksAt, rosterAt, got)
 	}
 }
 

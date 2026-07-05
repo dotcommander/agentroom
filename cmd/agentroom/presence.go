@@ -139,7 +139,7 @@ func writeHeartbeat(ctx context.Context, room *agentroom.Room, agentID, desc str
 		return
 	}
 	// Empty desc means "just refresh liveness" (claim/tail/non-JOINED post):
-	// refresh the TTL without overwriting a role label set at sign-in.
+	// refresh the TTL without overwriting a role label or inferred prompt label.
 	if desc == "" {
 		_ = room.RefreshPresence(ctx, agentID, room.Config().PresenceTTL)
 		return

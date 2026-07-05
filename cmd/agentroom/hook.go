@@ -19,6 +19,7 @@ import (
 type sessionStartInput struct {
 	CWD       string `json:"cwd"`
 	SessionID string `json:"session_id"`
+	Prompt    string `json:"prompt"`
 }
 
 func hookCmd() *cobra.Command {
@@ -105,25 +106,16 @@ func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, sel
 	}
 	open, _ := local.OpenTasks(ctx, 50)
 
-	lines := []string{
-		fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", repo, branch),
-		"",
-		"Sign in -- tell the room who you are and what you're here to do:",
-		"  agentroom post AGENT_JOINED '{\"role\":\"<what you do>\",\"working_on\":\"<your goal>\"}' --agent <your-handle>",
-		"(free-form; no required schema. Pick a short plain handle -- your session id is",
-		"appended automatically, so two agents sharing a handle stay distinct.)",
-		"",
-		"== who's here (live TTL presence; absence is not proof nobody's working) ==",
-	}
-	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
+	lines := []string{fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", repo, branch)}
 	recipients := inboxRecipientsForSession(ctx, local, selfID)
 	if s, _ := inboxDelta(ctx, local, recipients); s != "" {
 		lines = append(lines, "", s)
 	}
-	lines = append(lines, "", "== open tasks you could claim ==")
+	lines = append(lines, "", "== claimable tasks ==")
 	lines = append(lines, openLines(open)...)
-	lines = append(lines, "", "How to use: `agentroom who` to see who's here, `agentroom tail` to print recent events, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
-	lines = append(lines, "Post globally (all rooms, e.g. cross-repo announcements): `agentroom post <type> <payload> --repo lobby --agent <handle>`.")
+	lines = append(lines, "", "== who's here (live TTL presence; absence is not proof nobody's working) ==")
+	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
+	lines = append(lines, "", "Use `agentroom claim <id>` before editing claimed work; `agentroom done <id>` when finished; `agentroom tail` for the full feed.")
 	return strings.Join(lines, "\n")
 }
 
@@ -313,7 +305,7 @@ const (
 )
 
 // seedCursor sets this session's read cursor to the current stream tail so the
-// first UserPromptSubmit delta covers only events published after sign-in, never
+// first UserPromptSubmit delta covers only events published after session start, never
 // the full backlog. Best-effort: never fails the session.
 func seedCursor(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
 	seedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(addr, repo, branch)), sessionID)
@@ -355,7 +347,7 @@ func userPromptSubmit(c *cobra.Command) error {
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
-	writeHeartbeat(ctx, room, selfID, "")
+	writeInferredPresence(ctx, room, selfID, in.Prompt)
 	// Keep any "<handle>-<token>" named entry for this session live too, so it
 	// does not expire while only the anonymous session line is refreshed.
 	_ = room.RefreshSessionPresence(ctx, selfID, room.Config().PresenceTTL)
@@ -397,6 +389,35 @@ func userPromptSubmit(c *cobra.Command) error {
 	}
 	outln(string(data))
 	return nil
+}
+
+const inferredPresencePrefix = "current prompt: "
+
+func writeInferredPresence(ctx context.Context, room *agentroom.Room, agentID, prompt string) {
+	desc := inferredPresenceDesc(prompt)
+	if desc == "" {
+		writeHeartbeat(ctx, room, agentID, "")
+		return
+	}
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		writeHeartbeat(ctx, room, agentID, "")
+		return
+	}
+	current := pres[agentID]
+	if current != "" && !strings.HasPrefix(current, inferredPresencePrefix) {
+		writeHeartbeat(ctx, room, agentID, "")
+		return
+	}
+	writeHeartbeat(ctx, room, agentID, desc)
+}
+
+func inferredPresenceDesc(prompt string) string {
+	prompt = clip(prompt, 140)
+	if prompt == "" {
+		return ""
+	}
+	return inferredPresencePrefix + prompt
 }
 
 // deltaDigest renders new room events as a compact context block: one line per

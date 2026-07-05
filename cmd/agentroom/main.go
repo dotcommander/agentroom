@@ -377,7 +377,7 @@ func openCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Int64("count", 50, "how many recent stream entries to scan")
+	cmd.Flags().Int64("count", 50, "how many recent stream entries to scan (capped at 100)")
 	return cmd
 }
 
@@ -492,9 +492,9 @@ func sessionToken() string {
 	return fmt.Sprintf("%s-%d", host, os.Getppid())
 }
 
-// sanitizeHandle replaces characters that would corrupt the Redis key structure
-// (':' is the key separator) or the presence SCAN glob ('*' '?' '[' ']'), plus
-// whitespace, with '-'. Alphanumerics and '-' '_' '@' '.' pass through unchanged.
+// sanitizeHandle replaces characters that would corrupt Redis key structure
+// (':' is the key separator), plus whitespace, with '-'. Alphanumerics and
+// '-' '_' '@' '.' pass through unchanged.
 func sanitizeHandle(h string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {

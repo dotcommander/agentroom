@@ -118,7 +118,7 @@ func TestClaimCountRendersAcrossCLI(t *testing.T) {
 	ctx := context.Background()
 	const agent = "agent-d3"
 
-	// Sign in: sets the presence desc to "builder: capacity demo".
+	// AGENT_JOINED sets the manual presence desc to "builder: capacity demo".
 	if err := runCLI(ctx, mr.Addr(),
 		"post", "AGENT_JOINED", `{"role":"builder","working_on":"capacity demo"}`, "--agent", agent); err != nil {
 		t.Fatalf("post AGENT_JOINED: %v", err)
