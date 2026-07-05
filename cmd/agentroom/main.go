@@ -194,25 +194,6 @@ func postCmd() *cobra.Command {
 	return cmd
 }
 
-type AgentIdentity struct {
-	StableHandle string
-	QualifiedID  string
-	SessionID    string
-}
-
-func resolveAgentIdentity(cmd *cobra.Command) AgentIdentity {
-	raw, _ := cmd.Flags().GetString("agent")
-	sessionID := sessionToken()
-	ident := AgentIdentity{
-		QualifiedID: qualifyAgent(raw),
-		SessionID:   sessionID,
-	}
-	if cmd.Flags().Changed("agent") || os.Getenv("AGENTROOM_AGENT") != "" {
-		ident.StableHandle = sanitizeHandle(raw)
-	}
-	return ident
-}
-
 func waitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wait",
@@ -275,12 +256,27 @@ func resolveTarget(ctx context.Context, room *agentroom.Room, raw string) (strin
 	if raw == "" || strings.Contains(raw, ":") {
 		return raw, nil
 	}
-	pres, err := room.PresenceDetailed(ctx)
+	target, candidates, err := matchLiveTarget(ctx, room, raw)
 	if err != nil {
 		return "", err
 	}
-	if _, ok := pres[raw]; ok {
+	switch len(candidates) {
+	case 0:
 		return raw, nil
+	case 1:
+		return target, nil
+	default:
+		return "", fmt.Errorf("--to %q is ambiguous; candidates: %s", raw, strings.Join(candidates, ", "))
+	}
+}
+
+func matchLiveTarget(ctx context.Context, room *agentroom.Room, raw string) (string, []string, error) {
+	pres, err := room.PresenceDetailed(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, ok := pres[raw]; ok {
+		return raw, []string{raw}, nil
 	}
 	candidates := make([]string, 0)
 	for id := range pres {
@@ -289,14 +285,10 @@ func resolveTarget(ctx context.Context, room *agentroom.Room, raw string) (strin
 		}
 	}
 	sort.Strings(candidates)
-	switch len(candidates) {
-	case 0:
-		return raw, nil
-	case 1:
-		return candidates[0], nil
-	default:
-		return "", fmt.Errorf("--to %q is ambiguous; candidates: %s", raw, strings.Join(candidates, ", "))
+	if len(candidates) == 1 {
+		return candidates[0], candidates, nil
 	}
+	return "", candidates, nil
 }
 
 func durableInboxRecipient(rawTo string) string {
@@ -325,6 +317,9 @@ func catalogCmd() *cobra.Command {
 			for _, d := range defs {
 				outf("%-16s %s\n", d.Type, d.Description)
 				outf("%16s produces=%s requires=%s\n", "", d.Produces, d.Requires)
+				if d.Prerequisite != "" {
+					outf("%16s prereq=%s\n", "", d.Prerequisite)
+				}
 			}
 			return nil
 		},
@@ -341,7 +336,8 @@ func registerCmd() *cobra.Command {
 			defer func() { _ = rdb.Close() }()
 			produces, _ := c.Flags().GetString("produces")
 			requires, _ := c.Flags().GetString("requires")
-			def := agentroom.TaskDef{Type: args[0], Description: args[1], Produces: produces, Requires: requires}
+			prereq, _ := c.Flags().GetString("prereq")
+			def := agentroom.TaskDef{Type: args[0], Description: args[1], Produces: produces, Requires: requires, Prerequisite: prereq}
 			if err := room.RegisterTask(c.Context(), def); err != nil {
 				return err
 			}
@@ -351,6 +347,7 @@ func registerCmd() *cobra.Command {
 	}
 	cmd.Flags().String("produces", "", "event type emitted on success")
 	cmd.Flags().String("requires", "", "capability an agent needs to handle it")
+	cmd.Flags().String("prereq", "", "event type that must exist in the stream before this task may be claimed (disables gating when empty)")
 	return cmd
 }
 
@@ -391,7 +388,16 @@ func claimCmd() *cobra.Command {
 			defer func() { _ = rdb.Close() }()
 			agent := resolveAgent(c)
 			ttl, _ := c.Flags().GetDuration("ttl")
-			ok, err := room.Claim(c.Context(), args[0], agent, ttl)
+			force, _ := c.Flags().GetBool("force")
+			var (
+				ok  bool
+				err error
+			)
+			if force {
+				ok, err = room.Claim(c.Context(), args[0], agent, ttl)
+			} else {
+				ok, err = room.ClaimChecked(c.Context(), args[0], agent, ttl)
+			}
 			if err != nil {
 				return err
 			}
@@ -406,6 +412,7 @@ func claimCmd() *cobra.Command {
 	}
 	cmd.Flags().String("agent", defaultAgent(), "agent id claiming the task")
 	cmd.Flags().Duration("ttl", 5*time.Minute, "claim lease before another agent may reclaim")
+	cmd.Flags().Bool("force", false, "bypass the declared prerequisite gate and claim unconditionally")
 	return cmd
 }
 
@@ -520,5 +527,6 @@ func qualifyAgent(handle string) string {
 // truth for the identity a command acts as (presence key, event attribution,
 // claim owner).
 func resolveAgent(cmd *cobra.Command) string {
-	return resolveAgentIdentity(cmd).QualifiedID
+	raw, _ := cmd.Flags().GetString("agent")
+	return qualifyAgent(raw)
 }

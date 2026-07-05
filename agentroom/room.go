@@ -220,11 +220,11 @@ func (r *Room) WriteInboxCursor(ctx context.Context, recipient, id string, ttl t
 // wide recent slice and filters rather than maintaining a per-recipient index.
 const directedScanWindow = 200
 
-// Directed returns up to count of the most recent events addressed to agentID
-// (Event.To == agentID), newest-first — the read side of directed messaging.
-// Broadcast events (empty To) are excluded. It scans the recent window (bounded
-// by directedScanWindow) and filters; a recipient with no directed messages in
-// that window gets an empty slice.
+// Directed returns up to count of the most recent stream events addressed to
+// agentID (Event.To == agentID), newest-first. Broadcast events (empty To) are
+// excluded. This is a compatibility/read-recent helper: it scans only the
+// bounded recent window, so durable offline delivery should use EnqueueInbox and
+// InboxSince instead.
 func (r *Room) Directed(ctx context.Context, agentID string, count int64) ([]Event, error) {
 	if agentID == "" {
 		return nil, nil

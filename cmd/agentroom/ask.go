@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -126,25 +125,15 @@ func resolveLiveTarget(ctx context.Context, room *agentroom.Room, raw string) (s
 	if strings.Contains(raw, ":") {
 		return "", fmt.Errorf("--to %q is a room key; ask requires one live agent", raw)
 	}
-	pres, err := room.PresenceDetailed(ctx)
+	target, candidates, err := matchLiveTarget(ctx, room, raw)
 	if err != nil {
 		return "", err
 	}
-	if _, ok := pres[raw]; ok {
-		return raw, nil
-	}
-	candidates := make([]string, 0)
-	for id := range pres {
-		if strings.HasPrefix(id, raw) {
-			candidates = append(candidates, id)
-		}
-	}
-	sort.Strings(candidates)
 	switch len(candidates) {
 	case 0:
 		return "", fmt.Errorf("--to %q does not match a live agent", raw)
 	case 1:
-		return candidates[0], nil
+		return target, nil
 	default:
 		return "", fmt.Errorf("--to %q is ambiguous; candidates: %s", raw, strings.Join(candidates, ", "))
 	}

@@ -70,7 +70,7 @@ func TestPublishBoundsStreamLength(t *testing.T) {
 	room.cfg.StreamMaxLen = 5
 	ctx := context.Background()
 
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if err := room.Publish(ctx, &Event{Type: "EVENT", AgentID: "engine-1"}); err != nil {
 			t.Fatalf("publish %d: %v", i, err)
 		}

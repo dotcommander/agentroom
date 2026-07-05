@@ -156,10 +156,11 @@ const (
 // an agent should emit on success, and what capability it needs. Agents publish
 // these to the catalog so others can discover how to participate.
 type TaskDef struct {
-	Type        string `json:"type"`        // task/event type, e.g. "TESTS_FAILED"
-	Description string `json:"description"` // what it means and when it applies
-	Produces    string `json:"produces"`    // event type emitted on success
-	Requires    string `json:"requires"`    // capability an agent needs to handle it
+	Type         string `json:"type"`                   // task/event type, e.g. "TESTS_FAILED"
+	Description  string `json:"description"`            // what it means and when it applies
+	Produces     string `json:"produces"`               // event type emitted on success
+	Requires     string `json:"requires"`               // capability an agent needs to handle it
+	Prerequisite string `json:"prerequisite,omitempty"` // event type that must exist in the stream before this task may be claimed; "" disables gating
 }
 
 // Task is a unit of work derived from a catalogued stream event, identified by

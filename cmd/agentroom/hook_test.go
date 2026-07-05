@@ -658,7 +658,7 @@ func TestInboxDeltaSurvivesDirectedScanRollover(t *testing.T) {
 	if err := room.EnqueueInbox(ctx, "gary", *ev); err != nil {
 		t.Fatalf("enqueue inbox: %v", err)
 	}
-	for i := 0; i < 205; i++ {
+	for i := range 205 {
 		if err := room.Publish(ctx, &agentroom.Event{Type: "NOISE", AgentID: "peer"}); err != nil {
 			t.Fatalf("publish noise %d: %v", i, err)
 		}

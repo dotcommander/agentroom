@@ -70,7 +70,7 @@ func sessionStart(c *cobra.Command) error {
 	defer func() { _ = rdb.Close() }()
 	joinLobby(c.Context(), rdb, ref, in.SessionID)
 	writeLocalHeartbeat(c.Context(), rdb, ref, selfID)
-	seedCursor(c.Context(), rdb, ref, in.SessionID)
+	seedRoomCursor(c.Context(), agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), in.SessionID)
 	seedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
 	digest := buildDigest(c.Context(), rdb, ref, selfID)
 	if digest == "" {
@@ -316,13 +316,6 @@ const (
 	maxInboxEvents    = 20
 	nullPayloadString = "null"
 )
-
-// seedCursor sets this session's read cursor to the current stream tail so the
-// first UserPromptSubmit delta covers only events published after session start, never
-// the full backlog. Best-effort: never fails the session.
-func seedCursor(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID string) {
-	seedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), sessionID)
-}
 
 // joinCursor picks a new session's initial read cursor: replay the last
 // JoinReplayWindow of events so a session landing just after a peer's

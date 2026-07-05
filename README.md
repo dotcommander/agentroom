@@ -411,9 +411,11 @@ to untrusted parties.
 ### Directed messages (optional)
 
 Events broadcast by default, but `Event.To` addresses a single recipient and
-`Event.ReplyTo` threads a reply onto an earlier entry's stream ID. `Room.Directed`
-reads them back — the most recent events addressed to one agent, newest-first, with
-broadcasts (empty `To`) excluded:
+`Event.ReplyTo` threads a reply onto an earlier entry's stream ID. For durable
+offline delivery, copy agent-directed events to a per-recipient inbox with
+`EnqueueInbox` and drain it with `InboxSince`. `Room.Directed` remains a
+compatibility/read-recent helper: it scans only the bounded recent stream window
+and returns the newest addressed stream events first, with broadcasts excluded:
 
 ```go
 ev := &agentroom.Event{Type: "REVIEW_REQUEST", AgentID: "fixer-1", To: "reviewer-1", ReplyTo: priorID}
@@ -508,8 +510,12 @@ if err := archiver.RunDailySweep(ctx); err != nil {
 ## Testing
 
 ```bash
+go fix -diff ./...      # fail if go fix has unapplied rewrites
 go test ./...           # full: spins an in-process miniredis
 go test -short ./...    # fast: skips Redis-backed tests
+go build ./...
+go vet ./...
+golangci-lint run ./...
 ```
 
 Redis-backed tests use [`miniredis`](https://github.com/alicebob/miniredis) and

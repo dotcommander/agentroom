@@ -23,7 +23,7 @@ func newTestClient(t *testing.T) *redis.Client {
 func seed(t *testing.T, rdb *redis.Client, stream string, n int) {
 	t.Helper()
 	ctx := context.Background()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if err := rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: stream,
 			Values: map[string]any{"n": i},

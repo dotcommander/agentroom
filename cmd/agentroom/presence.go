@@ -10,24 +10,7 @@ import (
 	"github.com/dotcommander/agentroom/agentroom"
 )
 
-// presenceValue is the render-time view of one roster entry: the agent's free-form
-// description (the raw presence-key value) plus a live claim count. The presence
-// key stores only the opaque desc string; Claims is always derived at render time
-// (see presenceLines), never read from storage.
 const emptyRosterMsg = "(nobody else here)"
-
-type presenceValue struct {
-	Desc   string
-	Claims int
-}
-
-// decodePresence wraps a stored presence value (the opaque role/working-on
-// description string, possibly empty) into a presenceValue for rendering. Claims
-// is filled in at render time, never parsed from storage. Never errors — presence
-// rendering must not break on any value.
-func decodePresence(raw string) presenceValue {
-	return presenceValue{Desc: raw}
-}
 
 // presenceLines renders the live presence set (agentID -> description, from the
 // room's TTL presence keys) into the "== who's here ==" block. selfID is the
@@ -83,11 +66,9 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 	ids := visibleRosterIDs(pres, func(id, _ string) bool { return id == selfID })
 	lines := make([]string, 0, len(ids))
 	for _, id := range ids {
-		v := decodePresence(pres[id])
 		// claims is computed at render time (not stored) so the peer's
 		// label-preserving writer stays untouched; the count is always fresh.
-		v.Claims = claimsFor(id)
-		lines = append(lines, presenceLine(id, v))
+		lines = append(lines, presenceLine(id, pres[id], claimsFor(id)))
 	}
 	if len(lines) == 0 {
 		return []string{emptyRosterMsg}
@@ -99,13 +80,13 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 // trailing " (<N> claimed)" capacity hint when the agent holds outstanding
 // claims. The suffix is omitted when N == 0 (or unknown), preserving the
 // desc-only and id-only shapes for agents with no current load.
-func presenceLine(id string, v presenceValue) string {
+func presenceLine(id, desc string, claims int) string {
 	line := "  " + id
-	if v.Desc != "" {
-		line += " -- " + v.Desc
+	if desc != "" {
+		line += " -- " + desc
 	}
-	if v.Claims > 0 {
-		line += fmt.Sprintf(" (%d claimed)", v.Claims)
+	if claims > 0 {
+		line += fmt.Sprintf(" (%d claimed)", claims)
 	}
 	return line
 }

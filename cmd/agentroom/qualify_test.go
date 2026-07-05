@@ -17,7 +17,6 @@ func TestSanitizeHandle(t *testing.T) {
 		{"whitespace becomes dash", "a b\tc", "a-b-c"},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := sanitizeHandle(tc.in); got != tc.want {

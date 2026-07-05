@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -146,13 +147,7 @@ func TestClaimCountRendersAcrossCLI(t *testing.T) {
 	lines := presenceLines(pres, "", claimsCounter(ctx, room))
 
 	want := "  " + qualifyAgent(agent) + " -- builder: capacity demo (2 claimed)"
-	found := false
-	for _, l := range lines {
-		if l == want {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(lines, want)
 	if !found {
 		t.Fatalf("rendered presence missing claim count.\n want line: %q\n got lines: %#v", want, lines)
 	}

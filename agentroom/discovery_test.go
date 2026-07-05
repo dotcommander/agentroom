@@ -146,7 +146,7 @@ func TestOpenTasksCapsScanCount(t *testing.T) {
 	if err := room.RegisterTask(ctx, TaskDef{Type: evFailed, Description: "failed"}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	for i := 0; i < maxOpenTaskScanCount+10; i++ {
+	for i := range maxOpenTaskScanCount + 10 {
 		if err := room.Publish(ctx, &Event{Type: evFailed, AgentID: "ci"}); err != nil {
 			t.Fatalf("publish %d: %v", i, err)
 		}

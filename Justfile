@@ -12,13 +12,24 @@ test-short:
 test-ask:
     go test ./cmd/agentroom -run 'TestAskReplyAcrossCLI|TestBeginAskRejectsConcurrentAsk|TestWaitForReplyTimeout|TestResolveLiveTargetRejectsMissingAndAmbiguous' -count=1
 
-build:
+fix:
+    go fix ./...
+
+fix-check:
+    go fix -diff ./...
+
+build: fix-check
     go build ./...
 
-vet:
+vet: fix-check
     go vet ./cmd/agentroom ./agentroom
 
-check: test build vet
+lint: fix-check
+    golangci-lint run ./...
+
+analyze: vet lint
+
+check: test build vet lint
     git diff --check
 
 cli:
