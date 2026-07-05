@@ -6,10 +6,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +24,7 @@ import (
 const (
 	lobbyRepo     = "lobby"
 	defaultBranch = "main"
+	defaultHandle = "cli"
 )
 
 func main() {
@@ -77,7 +80,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().String("addr", envOr("REDIS_ADDR", "localhost:6379"), "Redis address")
 	root.PersistentFlags().String("repo", defaultRepo(), "repo id (room namespace)")
 	root.PersistentFlags().String("branch", envOr("BRANCH_NAME", "main"), "branch name (room namespace)")
-	root.AddCommand(tailCmd(), postCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), leaveCmd(), whoCmd(), hookCmd(), welcomeCmd())
+	root.AddCommand(tailCmd(), postCmd(), waitCmd(), askCmd(), replyCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), leaveCmd(), whoCmd(), hookCmd(), welcomeCmd())
 	return root
 }
 
@@ -91,23 +94,31 @@ func roomFromFlags(cmd *cobra.Command) (*agentroom.Room, *redis.Client) {
 	// --help/completion stay offline (only real room commands reach here).
 	// Explicit --repo/--branch always win; the registered default
 	// (defaultRepo/"main") remains the fallback when git/cwd are unavailable.
-	if !cmd.Flags().Changed("repo") || !cmd.Flags().Changed("branch") {
-		if wd, _ := os.Getwd(); wd != "" {
-			gitRepo, gitBranch := resolveRoom(cmd.Context(), wd)
-			if !cmd.Flags().Changed("repo") {
-				repo = gitRepo
-			}
-			if !cmd.Flags().Changed("branch") {
-				branch = gitBranch
-			}
-		}
-	}
+	repo, branch = resolveRoomIdentity(cmd, repo, branch)
 	cfg := agentroom.DefaultConfig()
 	cfg.RedisAddr = addr
 	cfg.RepoID = repo
 	cfg.BranchName = branch
 	rdb := newRedisClient(cfg.RedisAddr)
 	return agentroom.NewRoom(rdb, cfg), rdb
+}
+
+func resolveRoomIdentity(cmd *cobra.Command, repo, branch string) (string, string) {
+	if cmd.Flags().Changed("repo") && cmd.Flags().Changed("branch") {
+		return repo, branch
+	}
+	wd, _ := os.Getwd()
+	if wd == "" {
+		return repo, branch
+	}
+	gitRepo, gitBranch := resolveRoom(cmd.Context(), wd)
+	if !cmd.Flags().Changed("repo") {
+		repo = gitRepo
+	}
+	if !cmd.Flags().Changed("branch") {
+		branch = gitBranch
+	}
+	return repo, branch
 }
 
 func tailCmd() *cobra.Command {
@@ -149,7 +160,15 @@ func postCmd() *cobra.Command {
 			room, rdb := roomFromFlags(c)
 			defer func() { _ = rdb.Close() }()
 			agent := resolveAgent(c)
-			to, _ := c.Flags().GetString("to")
+			rawTo, _ := c.Flags().GetString("to")
+			to, err := resolveTarget(c.Context(), room, rawTo)
+			if err != nil {
+				return err
+			}
+			if rawTo != "" && to == rawTo && !strings.Contains(rawTo, ":") {
+				_, _ = fmt.Fprintf(c.ErrOrStderr(), "warning: no live agent matches --to %q; posting verbatim\n", rawTo)
+			}
+			inboxRecipient := durableInboxRecipient(rawTo)
 			var payload []byte
 			if len(args) == 2 {
 				payload = []byte(args[1])
@@ -157,6 +176,11 @@ func postCmd() *cobra.Command {
 			ev := &agentroom.Event{Type: args[0], AgentID: agent, To: to, Payload: payload}
 			if err := room.Publish(c.Context(), ev); err != nil {
 				return err
+			}
+			if inboxRecipient != "" {
+				if err := room.EnqueueInbox(c.Context(), inboxRecipient, *ev); err != nil {
+					return fmt.Errorf("posted %s as %s (entry %s), but durable inbox enqueue failed: %w", ev.Type, agent, ev.ID, err)
+				}
 			}
 			// Opportunistic heartbeat: every CLI call refreshes the agent's
 			// presence TTL key — this is the heartbeat in a daemonless CLI.
@@ -168,6 +192,118 @@ func postCmd() *cobra.Command {
 	cmd.Flags().String("agent", defaultAgent(), "agent id to attribute the event to")
 	cmd.Flags().String("to", "", `directed recipient: a room key "repo:branch" or an agent handle (empty = broadcast)`)
 	return cmd
+}
+
+type AgentIdentity struct {
+	StableHandle string
+	QualifiedID  string
+	SessionID    string
+}
+
+func resolveAgentIdentity(cmd *cobra.Command) AgentIdentity {
+	raw, _ := cmd.Flags().GetString("agent")
+	sessionID := sessionToken()
+	ident := AgentIdentity{
+		QualifiedID: qualifyAgent(raw),
+		SessionID:   sessionID,
+	}
+	if cmd.Flags().Changed("agent") || os.Getenv("AGENTROOM_AGENT") != "" {
+		ident.StableHandle = sanitizeHandle(raw)
+	}
+	return ident
+}
+
+func waitCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "wait",
+		Short: "Block until the next room event arrives",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			room, rdb := roomFromFlags(c)
+			defer func() { _ = rdb.Close() }()
+			agent := resolveAgent(c)
+			toMe, _ := c.Flags().GetBool("to-me")
+			timeout, _ := c.Flags().GetDuration("timeout")
+			writeHeartbeat(c.Context(), room, agent, "")
+			ev, err := waitForEvent(c.Context(), room, agent, toMe, timeout)
+			if err != nil {
+				return err
+			}
+			printEvent(ev)
+			return nil
+		},
+	}
+	cmd.Flags().String("agent", defaultAgent(), "agent id to match when --to-me is set")
+	cmd.Flags().Bool("to-me", false, "only unblock for events directed to this agent")
+	cmd.Flags().Duration("timeout", 0, "maximum time to wait (0 = wait until interrupted)")
+	return cmd
+}
+
+func waitForEvent(ctx context.Context, room *agentroom.Room, agent string, toMe bool, timeout time.Duration) (agentroom.Event, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	lastID, err := room.LastID(ctx)
+	if err != nil {
+		return agentroom.Event{}, err
+	}
+	for {
+		events, err := room.Wait(ctx, lastID, 2*time.Second, 10)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && timeout > 0 {
+				return agentroom.Event{}, fmt.Errorf("wait timed out after %s", timeout)
+			}
+			return agentroom.Event{}, err
+		}
+		for _, ev := range events {
+			lastID = ev.ID
+			if toMe && ev.To != agent {
+				continue
+			}
+			return ev, nil
+		}
+	}
+}
+
+// resolveTarget turns a human --to value into the live qualified roster ID when
+// possible. Room keys ("repo:branch") pass through; exact roster IDs win; then a
+// unique prefix match wins. Ambiguous prefixes are rejected with candidates so a
+// directed post never guesses between two live agents.
+func resolveTarget(ctx context.Context, room *agentroom.Room, raw string) (string, error) {
+	if raw == "" || strings.Contains(raw, ":") {
+		return raw, nil
+	}
+	pres, err := room.PresenceDetailed(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := pres[raw]; ok {
+		return raw, nil
+	}
+	candidates := make([]string, 0)
+	for id := range pres {
+		if strings.HasPrefix(id, raw) {
+			candidates = append(candidates, id)
+		}
+	}
+	sort.Strings(candidates)
+	switch len(candidates) {
+	case 0:
+		return raw, nil
+	case 1:
+		return candidates[0], nil
+	default:
+		return "", fmt.Errorf("--to %q is ambiguous; candidates: %s", raw, strings.Join(candidates, ", "))
+	}
+}
+
+func durableInboxRecipient(rawTo string) string {
+	if rawTo == "" || strings.Contains(rawTo, ":") {
+		return ""
+	}
+	return sanitizeHandle(rawTo)
 }
 
 func catalogCmd() *cobra.Command {
@@ -337,7 +473,7 @@ func defaultAgent() string {
 	if v := os.Getenv("AGENTROOM_AGENT"); v != "" {
 		return v
 	}
-	return "cli"
+	return defaultHandle
 }
 
 // sessionToken is the per-session disambiguator appended to every handle.
@@ -384,6 +520,5 @@ func qualifyAgent(handle string) string {
 // truth for the identity a command acts as (presence key, event attribution,
 // claim owner).
 func resolveAgent(cmd *cobra.Command) string {
-	raw, _ := cmd.Flags().GetString("agent")
-	return qualifyAgent(raw)
+	return resolveAgentIdentity(cmd).QualifiedID
 }

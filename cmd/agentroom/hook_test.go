@@ -135,3 +135,100 @@ func TestLobbyDigest(t *testing.T) {
 		t.Errorf("missing lobby feed hint: %q", got)
 	}
 }
+
+func TestInboxDeltaSurvivesDirectedScanRollover(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "repo", "main"))
+	ctx := context.Background()
+
+	ev := &agentroom.Event{Type: "MSG", AgentID: "alice", To: "gary", Payload: []byte(`{"m":1}`)}
+	if err := room.Publish(ctx, ev); err != nil {
+		t.Fatalf("publish directed: %v", err)
+	}
+	if err := room.EnqueueInbox(ctx, "gary", *ev); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+	for i := 0; i < 205; i++ {
+		if err := room.Publish(ctx, &agentroom.Event{Type: "NOISE", AgentID: "peer"}); err != nil {
+			t.Fatalf("publish noise %d: %v", i, err)
+		}
+	}
+	scanned, err := room.Directed(ctx, "gary", 10)
+	if err != nil {
+		t.Fatalf("directed scan: %v", err)
+	}
+	if len(scanned) != 0 {
+		t.Fatalf("directed scan found %d messages after rollover, want 0", len(scanned))
+	}
+
+	section, sourceIDs := inboxDelta(ctx, room, []string{"gary"})
+	if !strings.Contains(section, "1 directed message(s) for you") || !strings.Contains(section, `{"m":1}`) {
+		t.Fatalf("inbox section missing directed message: %q", section)
+	}
+	if !sourceIDs[ev.ID] {
+		t.Fatalf("rendered source IDs missing %q: %#v", ev.ID, sourceIDs)
+	}
+	again, _ := inboxDelta(ctx, room, []string{"gary"})
+	if again != "" {
+		t.Fatalf("second inbox drain = %q, want empty", again)
+	}
+}
+
+func TestLocalDeltaSkipsInboxDeliveredSource(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "repo", "main"))
+	ctx := context.Background()
+
+	ev := &agentroom.Event{Type: "MSG", AgentID: "alice", To: "gary-sess1", Payload: []byte(`{"m":1}`)}
+	if err := room.Publish(ctx, ev); err != nil {
+		t.Fatalf("publish directed: %v", err)
+	}
+	if err := room.EnqueueInbox(ctx, "gary", *ev); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+	if err := room.WriteCursor(ctx, "session-1", "0-0", room.Config().CursorTTL); err != nil {
+		t.Fatalf("write cursor: %v", err)
+	}
+
+	inboxSection, rendered := inboxDelta(ctx, room, []string{"gary"})
+	if inboxSection == "" {
+		t.Fatal("inbox section empty")
+	}
+	local := localDelta(ctx, room, localDeltaOptions{
+		SessionID:     "session-1",
+		Repo:          "repo",
+		Branch:        "main",
+		SkipTo:        recipientSet([]string{"gary", "gary-sess1"}),
+		SkipSourceIDs: rendered,
+	})
+	if local != "" {
+		t.Fatalf("local delta duplicated inbox-delivered event: %q", local)
+	}
+	cursor, err := room.ReadCursor(ctx, "session-1")
+	if err != nil {
+		t.Fatalf("read cursor: %v", err)
+	}
+	if cursor != ev.ID {
+		t.Fatalf("local cursor = %q, want %q", cursor, ev.ID)
+	}
+}

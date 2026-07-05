@@ -116,6 +116,10 @@ func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, sel
 		"== who's here (live TTL presence; absence is not proof nobody's working) ==",
 	}
 	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
+	recipients := inboxRecipientsForSession(ctx, local, selfID)
+	if s, _ := inboxDelta(ctx, local, recipients); s != "" {
+		lines = append(lines, "", s)
+	}
 	lines = append(lines, "", "== open tasks you could claim ==")
 	lines = append(lines, openLines(open)...)
 	lines = append(lines, "", "How to use: `agentroom who` to see who's here, `agentroom tail` to print recent events, `agentroom open` for work, `claim <id>` before you start, `post <type> <payload>` to announce, `done <id>` when finished.")
@@ -302,8 +306,10 @@ func clip(s string, n int) string {
 }
 
 const (
-	hookOpTimeout  = 2 * time.Second
-	maxDeltaEvents = 20
+	hookOpTimeout     = 2 * time.Second
+	maxDeltaEvents    = 20
+	maxInboxEvents    = 20
+	nullPayloadString = "null"
 )
 
 // seedCursor sets this session's read cursor to the current stream tail so the
@@ -357,8 +363,19 @@ func userPromptSubmit(c *cobra.Command) error {
 	// Compose this room's delta with the cross-repo lobby delta. Each section is
 	// independent: a quiet local room no longer suppresses cross-repo signal, and
 	// the local section is unchanged (deltaDigest) when present.
-	sections := make([]string, 0, 2)
-	if s := localDelta(ctx, room, in.SessionID, repo, branch); s != "" {
+	recipients := inboxRecipientsForSession(ctx, room, selfID)
+	inboxSection, renderedSourceIDs := inboxDelta(ctx, room, recipients)
+	sections := make([]string, 0, 3)
+	if inboxSection != "" {
+		sections = append(sections, inboxSection)
+	}
+	if s := localDelta(ctx, room, localDeltaOptions{
+		SessionID:     in.SessionID,
+		Repo:          repo,
+		Branch:        branch,
+		SkipTo:        recipientSet(recipients),
+		SkipSourceIDs: renderedSourceIDs,
+	}); s != "" {
 		sections = append(sections, s)
 	}
 	if s := lobbyDelta(ctx, rdb, addr, repo, branch, in.SessionID, selfID); s != "" {
@@ -394,7 +411,7 @@ func deltaDigest(repo, branch string, events []agentroom.Event) string {
 			agent = "?"
 		}
 		line := fmt.Sprintf("  %s  %s", ev.Type, agent)
-		if p := clip(string(ev.Payload), 120); p != "" && p != "null" {
+		if p := clip(string(ev.Payload), 120); p != "" && p != nullPayloadString {
 			line += "  " + p
 		}
 		lines = append(lines, line)

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/dotcommander/agentchat/agentroom"
@@ -38,8 +40,16 @@ func seedRoomCursor(ctx context.Context, room *agentroom.Room, sessionID string)
 // (advancing it), or "" when there is nothing new. Extracted verbatim from
 // userPromptSubmit so the per-prompt hook can compose it with the cross-repo
 // lobby delta; the local output stays byte-identical (deltaDigest), additive-only.
-func localDelta(ctx context.Context, room *agentroom.Room, sessionID, repo, branch string) string {
-	cursor, err := room.ReadCursor(ctx, sessionID)
+type localDeltaOptions struct {
+	SessionID     string
+	Repo          string
+	Branch        string
+	SkipTo        map[string]bool
+	SkipSourceIDs map[string]bool
+}
+
+func localDelta(ctx context.Context, room *agentroom.Room, opts localDeltaOptions) string {
+	cursor, err := room.ReadCursor(ctx, opts.SessionID)
 	if err != nil {
 		return ""
 	}
@@ -48,7 +58,7 @@ func localDelta(ctx context.Context, room *agentroom.Room, sessionID, repo, bran
 		// seed the join cursor so a recovered session still catches just-landed
 		// events; nothing to inject this prompt.
 		if c := joinCursor(ctx, room); c != "" {
-			_ = room.WriteCursor(ctx, sessionID, c, room.Config().CursorTTL)
+			_ = room.WriteCursor(ctx, opts.SessionID, c, room.Config().CursorTTL)
 		}
 		return ""
 	}
@@ -56,8 +66,127 @@ func localDelta(ctx context.Context, room *agentroom.Room, sessionID, repo, bran
 	if err != nil || len(events) == 0 {
 		return ""
 	}
-	_ = room.WriteCursor(ctx, sessionID, events[len(events)-1].ID, room.Config().CursorTTL)
-	return deltaDigest(repo, branch, events)
+	_ = room.WriteCursor(ctx, opts.SessionID, events[len(events)-1].ID, room.Config().CursorTTL)
+	rendered := make([]agentroom.Event, 0, len(events))
+	for _, ev := range events {
+		if opts.SkipSourceIDs[ev.ID] || (ev.To != "" && opts.SkipTo[ev.To]) {
+			continue
+		}
+		rendered = append(rendered, ev)
+	}
+	if len(rendered) == 0 {
+		return ""
+	}
+	return deltaDigest(opts.Repo, opts.Branch, rendered)
+}
+
+func inboxRecipientsForSession(ctx context.Context, room *agentroom.Room, selfID string) []string {
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id != "" {
+			seen[id] = true
+		}
+	}
+	add(selfID)
+	if raw := os.Getenv("AGENTROOM_AGENT"); raw != "" {
+		stable := sanitizeHandle(raw)
+		add(stable)
+		add(stable + "-" + selfID)
+	}
+	if pres, err := room.Presence(ctx); err == nil {
+		suffix := "-" + selfID
+		for id := range pres {
+			if !strings.HasSuffix(id, suffix) {
+				continue
+			}
+			add(id)
+			stable := strings.TrimSuffix(id, suffix)
+			if stable != "" && stable != defaultHandle {
+				add(stable)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func inboxDelta(ctx context.Context, room *agentroom.Room, recipients []string) (string, map[string]bool) {
+	renderedSourceIDs := map[string]bool{}
+	if len(recipients) == 0 {
+		return "", renderedSourceIDs
+	}
+	all, lastByRecipient := collectInboxEvents(ctx, room, recipients)
+	if len(all) == 0 {
+		return "", renderedSourceIDs
+	}
+	section, renderedSourceIDs := renderInboxEvents(all)
+	for recipient, id := range lastByRecipient {
+		_ = room.WriteInboxCursor(ctx, recipient, id, room.Config().InboxCursorTTL)
+	}
+	return section, renderedSourceIDs
+}
+
+func collectInboxEvents(ctx context.Context, room *agentroom.Room, recipients []string) ([]agentroom.InboxEvent, map[string]string) {
+	var all []agentroom.InboxEvent
+	lastByRecipient := map[string]string{}
+	for _, recipient := range recipients {
+		cursor, err := room.ReadInboxCursor(ctx, recipient)
+		if err != nil {
+			continue
+		}
+		events, err := room.InboxSince(ctx, recipient, cursor, maxInboxEvents)
+		if err != nil || len(events) == 0 {
+			continue
+		}
+		all = append(all, events...)
+		lastByRecipient[recipient] = events[len(events)-1].ID
+	}
+	return all, lastByRecipient
+}
+
+func renderInboxEvents(all []agentroom.InboxEvent) (string, map[string]bool) {
+	renderedSourceIDs := map[string]bool{}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].Event.Timestamp == all[j].Event.Timestamp {
+			return all[i].SourceID < all[j].SourceID
+		}
+		return all[i].Event.Timestamp < all[j].Event.Timestamp
+	})
+	lines := []string{
+		fmt.Sprintf("agentroom -- %d directed message(s) for you:", len(all)),
+	}
+	for _, msg := range all {
+		ev := msg.Event
+		agent := ev.AgentID
+		if agent == "" {
+			agent = "?"
+		}
+		line := fmt.Sprintf("  %s  %s", ev.Type, agent)
+		if ev.To != "" {
+			line += "  ->" + ev.To
+		}
+		if p := clip(string(ev.Payload), 120); p != "" && p != nullPayloadString {
+			line += "  " + p
+		}
+		lines = append(lines, line)
+		if msg.SourceID != "" {
+			renderedSourceIDs[msg.SourceID] = true
+		}
+	}
+	lines = append(lines, "", "(`agentroom tail` for the full feed)")
+	return strings.Join(lines, "\n"), renderedSourceIDs
+}
+
+func recipientSet(recipients []string) map[string]bool {
+	out := make(map[string]bool, len(recipients))
+	for _, recipient := range recipients {
+		out[recipient] = true
+	}
+	return out
 }
 
 // lobbyDelta reads new global-lobby events since this session's separate lobby
@@ -111,7 +240,7 @@ func lobbyDigest(events []agentroom.Event) string {
 		if ev.To != "" {
 			line += "  ->" + ev.To
 		}
-		if p := clip(string(ev.Payload), 120); p != "" && p != "null" {
+		if p := clip(string(ev.Payload), 120); p != "" && p != nullPayloadString {
 			line += "  " + p
 		}
 		lines = append(lines, line)
