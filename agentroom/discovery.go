@@ -16,6 +16,11 @@ const (
 	taskDoneSuffix  = ":done"
 )
 
+const (
+	defaultOpenTaskScanCount = 50
+	maxOpenTaskScanCount     = 100
+)
+
 type taskStateKeys struct {
 	done  string
 	owner string
@@ -145,6 +150,7 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	count = normalizeOpenTaskScanCount(count)
 	msgs, err := r.rdb.XRevRangeN(ctx, r.cfg.StreamKey(), "+", "-", count).Result()
 	if err != nil {
 		return nil, fmt.Errorf("agentroom: scan open tasks: %w", err)
@@ -190,6 +196,17 @@ func (r *Room) OpenTasks(ctx context.Context, count int64) ([]Task, error) {
 		open = append(open, task)
 	}
 	return open, nil
+}
+
+func normalizeOpenTaskScanCount(count int64) int64 {
+	switch {
+	case count <= 0:
+		return defaultOpenTaskScanCount
+	case count > maxOpenTaskScanCount:
+		return maxOpenTaskScanCount
+	default:
+		return count
+	}
 }
 
 // candidateOpen reports whether a pipelined task is still open: a redis.Nil on

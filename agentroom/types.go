@@ -70,8 +70,8 @@ func DefaultConfig() Config {
 }
 
 // roomPrefix is the "repo:<id>:<branch>" namespace every room key is built on —
-// the single source of truth for the key layout that Presence/Archiver SCAN
-// globs ("repo:*:events", the presence prefix) depend on.
+// the single source of truth for the key layout that stream archiving and room
+// coordination keys depend on.
 func (c Config) roomPrefix() string {
 	return "repo:" + c.RepoID + ":" + c.BranchName
 }
@@ -87,9 +87,16 @@ func (c Config) ScratchpadPrefix() string {
 }
 
 // PresencePrefix is the key prefix for this room's live per-agent presence
-// records. SCAN this prefix to enumerate agents active within PresenceTTL.
+// records.
 func (c Config) PresencePrefix() string {
 	return c.roomPrefix() + ":presence:"
+}
+
+// PresenceIndexKey is the per-room sorted set of active agent IDs scored by
+// presence expiry time in Unix milliseconds. It lets roster reads enumerate the
+// room directly instead of SCANning the Redis database for PresencePrefix.
+func (c Config) PresenceIndexKey() string {
+	return c.roomPrefix() + ":presence:index"
 }
 
 // PresenceKey is the TTL key holding one agent's presence description (role /

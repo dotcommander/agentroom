@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -368,7 +369,16 @@ func (r *Room) ReplayCursorFrom(now time.Time, window time.Duration) string {
 // invocation, so the key auto-expires ttl after the agent's last activity — a
 // crashed agent drops from presence with no SESSION_ENDED needed.
 func (r *Room) Heartbeat(ctx context.Context, agentID, desc string, ttl time.Duration) error {
-	if err := r.rdb.Set(ctx, r.cfg.PresenceKey(agentID), desc, ttl).Err(); err != nil {
+	pipe := r.rdb.Pipeline()
+	pipe.Set(ctx, r.cfg.PresenceKey(agentID), desc, ttl)
+	pipe.ZAdd(ctx, r.cfg.PresenceIndexKey(), redis.Z{
+		Score:  presenceExpiryScore(ttl),
+		Member: agentID,
+	})
+	if r.cfg.StreamTTL > 0 {
+		pipe.Expire(ctx, r.cfg.PresenceIndexKey(), r.cfg.StreamTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("agentroom: heartbeat %s: %w", agentID, err)
 	}
 	return nil
@@ -376,19 +386,21 @@ func (r *Room) Heartbeat(ctx context.Context, agentID, desc string, ttl time.Dur
 
 // refreshPresenceScript refreshes a presence key's TTL without disturbing its
 // description; if the key is absent it creates a label-less record. This keeps
-// non-join activity (claim/tail/non-JOINED post) from clobbering a role label
-// set at sign-in while still registering liveness.
+// liveness-only activity (claim/tail/non-JOINED post) from clobbering a role
+// label or hook-inferred working-on label while still registering liveness.
 var refreshPresenceScript = redis.NewScript(`
 if redis.call('pexpire', KEYS[1], ARGV[1]) == 0 then
 	redis.call('set', KEYS[1], '', 'PX', ARGV[1])
 end
+redis.call('zadd', KEYS[2], ARGV[3], ARGV[2])
 return 1
 `)
 
 // RefreshPresence extends agentID's presence TTL, preserving any existing
 // description, and creates an empty record if none exists.
 func (r *Room) RefreshPresence(ctx context.Context, agentID string, ttl time.Duration) error {
-	if err := refreshPresenceScript.Run(ctx, r.rdb, []string{r.cfg.PresenceKey(agentID)}, ttl.Milliseconds()).Err(); err != nil {
+	keys := []string{r.cfg.PresenceKey(agentID), r.cfg.PresenceIndexKey()}
+	if err := refreshPresenceScript.Run(ctx, r.rdb, keys, ttl.Milliseconds(), agentID, presenceExpiryScore(ttl)).Err(); err != nil {
 		return fmt.Errorf("agentroom: refresh presence %s: %w", agentID, err)
 	}
 	return nil
@@ -405,19 +417,20 @@ func (r *Room) RefreshSessionPresence(ctx context.Context, sessionToken string, 
 	if sessionToken == "" {
 		return nil
 	}
-	prefix := r.cfg.PresencePrefix()
-	iter := r.rdb.Scan(ctx, 0, prefix+"*-"+sessionToken, 0).Iterator()
-	for iter.Next(ctx) {
+	agentIDs, err := r.activePresenceAgentIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("agentroom: read session presence %s: %w", sessionToken, err)
+	}
+	for _, agentID := range agentIDs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		agentID := strings.TrimPrefix(iter.Val(), prefix)
+		if !strings.HasSuffix(agentID, "-"+sessionToken) {
+			continue
+		}
 		if err := r.RefreshPresence(ctx, agentID, ttl); err != nil {
 			return err
 		}
-	}
-	if err := iter.Err(); err != nil {
-		return fmt.Errorf("agentroom: scan session presence %s: %w", sessionToken, err)
 	}
 	return nil
 }
@@ -425,16 +438,19 @@ func (r *Room) RefreshSessionPresence(ctx context.Context, sessionToken string, 
 // ClearPresence deletes this agent's presence record for a clean fast exit
 // (called on SESSION_ENDED). Absence of the key is not an error.
 func (r *Room) ClearPresence(ctx context.Context, agentID string) error {
-	if err := r.rdb.Del(ctx, r.cfg.PresenceKey(agentID)).Err(); err != nil {
+	pipe := r.rdb.Pipeline()
+	pipe.Del(ctx, r.cfg.PresenceKey(agentID))
+	pipe.ZRem(ctx, r.cfg.PresenceIndexKey(), agentID)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("agentroom: clear presence %s: %w", agentID, err)
 	}
 	return nil
 }
 
-// Presence returns the live presence set as agentID -> description, by SCANning
-// the room's presence prefix (cursor-based, non-blocking — never KEYS) and
-// reading each key. Expired keys are simply absent. This is the liveness-backed
-// replacement for folding AGENT_JOINED/SESSION_ENDED off the event stream.
+// Presence returns the live presence set as agentID -> description from the
+// room's indexed presence roster. Expired keys are simply absent. This is the
+// liveness-backed replacement for folding AGENT_JOINED/SESSION_ENDED off the
+// event stream.
 func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
 	entries, err := r.presenceScan(ctx, false)
 	if err != nil {
@@ -449,54 +465,97 @@ func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
 
 // PresenceEntry is one live roster record: the agent's free-form description and
 // the time left on its presence TTL before it drops absent a refresh. Surfaced
-// by the `who` command; Presence (the hot digest path) omits the TTL to skip the
-// extra PTTL round-trip per key.
+// by the `who` command; Presence (the hot digest path) omits the TTL so it only
+// batches description reads.
 type PresenceEntry struct {
 	Desc string
 	TTL  time.Duration
 }
 
 // PresenceDetailed is Presence plus each key's remaining TTL — the on-demand
-// roster view behind `who`. Same cursor-based SCAN (never KEYS); additionally
-// reads PTTL per key. Keys that expire mid-scan are skipped. Kept separate from
-// Presence so the per-prompt digest path stays a single GET per key.
+// roster view behind `who`. It uses the same indexed roster read and additionally
+// batches PTTL reads. Keys that expire mid-read are skipped. Kept separate from
+// Presence so the per-prompt digest path does not read TTLs.
 func (r *Room) PresenceDetailed(ctx context.Context) (map[string]PresenceEntry, error) {
 	return r.presenceScan(ctx, true)
 }
 
-// presenceScan is the shared SCAN-and-read behind Presence and PresenceDetailed:
-// it walks the room's presence prefix (cursor-based, never KEYS), reads each
-// key's description, and — only when withTTL — adds a PTTL round-trip so the hot
-// digest path (withTTL=false) stays a single GET per key. Keys that expire
-// between SCAN and GET are skipped.
+// presenceScan is the shared indexed read behind Presence and PresenceDetailed:
+// it trims expired roster index entries, reads active agent IDs from the room's
+// ZSET, then batches description reads and — only when withTTL — TTL reads. Keys
+// that expire between the index read and batched reads are skipped.
 func (r *Room) presenceScan(ctx context.Context, withTTL bool) (map[string]PresenceEntry, error) {
 	prefix := r.cfg.PresencePrefix()
-	out := make(map[string]PresenceEntry)
-	iter := r.rdb.Scan(ctx, 0, prefix+"*", 0).Iterator()
-	for iter.Next(ctx) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	agentIDs, err := r.activePresenceAgentIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(agentIDs) == 0 {
+		return map[string]PresenceEntry{}, nil
+	}
+	pipe := r.rdb.Pipeline()
+	entries := make([]presenceReadCmds, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		key := prefix + agentID
+		cmds := presenceReadCmds{
+			key:  key,
+			desc: pipe.Get(ctx, key),
 		}
-		key := iter.Val()
-		desc, err := r.rdb.Get(ctx, key).Result()
+		if withTTL {
+			cmds.ttl = pipe.PTTL(ctx, key)
+		}
+		entries = append(entries, cmds)
+	}
+	_, _ = pipe.Exec(ctx)
+	return presenceEntries(prefix, entries, withTTL)
+}
+
+func (r *Room) activePresenceAgentIDs(ctx context.Context) ([]string, error) {
+	now := time.Now().UnixMilli()
+	pipe := r.rdb.Pipeline()
+	pipe.ZRemRangeByScore(ctx, r.cfg.PresenceIndexKey(), "-inf", strconv.FormatInt(now, 10))
+	active := pipe.ZRangeByScore(ctx, r.cfg.PresenceIndexKey(), &redis.ZRangeBy{
+		Min: strconv.FormatInt(now, 10),
+		Max: "+inf",
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("agentroom: read presence index: %w", err)
+	}
+	return active.Result()
+}
+
+func presenceExpiryScore(ttl time.Duration) float64 {
+	return float64(time.Now().Add(ttl).UnixMilli())
+}
+
+type presenceReadCmds struct {
+	key  string
+	desc *redis.StringCmd
+	ttl  *redis.DurationCmd
+}
+
+func presenceEntries(prefix string, entries []presenceReadCmds, withTTL bool) (map[string]PresenceEntry, error) {
+	out := make(map[string]PresenceEntry, len(entries))
+	for _, cmds := range entries {
+		desc, err := cmds.desc.Result()
 		if errors.Is(err, redis.Nil) {
 			continue // key expired between SCAN and GET — not present
 		}
 		if err != nil {
-			return nil, fmt.Errorf("agentroom: read presence %s: %w", key, err)
+			return nil, fmt.Errorf("agentroom: read presence %s: %w", cmds.key, err)
 		}
 		entry := PresenceEntry{Desc: desc}
 		if withTTL {
-			ttl, err := r.rdb.PTTL(ctx, key).Result()
+			ttl, err := cmds.ttl.Result()
+			if errors.Is(err, redis.Nil) {
+				continue // key expired between GET and PTTL — not present
+			}
 			if err != nil {
-				return nil, fmt.Errorf("agentroom: ttl presence %s: %w", key, err)
+				return nil, fmt.Errorf("agentroom: ttl presence %s: %w", cmds.key, err)
 			}
 			entry.TTL = ttl
 		}
-		out[strings.TrimPrefix(key, prefix)] = entry
-	}
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("agentroom: scan presence: %w", err)
+		out[strings.TrimPrefix(cmds.key, prefix)] = entry
 	}
 	return out, nil
 }

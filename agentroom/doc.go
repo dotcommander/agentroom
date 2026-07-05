@@ -7,11 +7,11 @@
 //     reads/writes a TTL'd scratchpad for heavy transient data, and reads recent
 //     activity via Recent. Each publish refreshes an idle-expiry lease, so a
 //     silent stream auto-expires after Config.StreamTTL. Room also tracks live
-//     presence: Heartbeat writes a per-agent TTL key (the agent's role label),
-//     RefreshPresence extends its TTL without disturbing the label, ClearPresence
-//     deletes it, and Presence enumerates the live set by SCANning the presence
-//     keys. Liveness is TTL-based — a crashed agent drops within Config.PresenceTTL
-//     with no explicit exit needed.
+//     presence: Heartbeat writes a per-agent TTL key (the agent's role label)
+//     and indexes the agent in a per-room sorted set, RefreshPresence extends
+//     its TTL without disturbing the label, ClearPresence deletes it, and
+//     Presence enumerates the indexed live set. Liveness is TTL-based — a
+//     crashed agent drops within Config.PresenceTTL with no explicit exit needed.
 //
 //   - Runtime (agent.go) wraps a Worker and consumes the stream through a Redis
 //     consumer group. Delivery is at-least-once and survives restarts: the group
@@ -39,10 +39,10 @@
 // library itself reads no configuration and depends only on go-redis.
 //
 // The cmd/agentroom CLI exposes these operations to shell-capable agents
-// (tail, post, catalog, open, claim, done, welcome) and ships Claude Code
-// SessionStart/SessionEnd hooks that greet agents with room activity and post a
-// session summary on exit. Every CLI invocation refreshes the agent's presence
-// TTL (an opportunistic heartbeat); session-start sets the role label and
-// session-end deletes the presence key. The "who's here" digest renders each
-// live agent with its outstanding claim count, computed at render time.
+// (tail, post, catalog, open, claim, done, welcome) and ships Claude Code hooks
+// that greet agents with room activity, infer a working-on label from prompts,
+// and post a session summary on exit. Every CLI invocation refreshes the agent's
+// presence TTL (an opportunistic heartbeat); session-end deletes the presence
+// key. The "who's here" digest renders each live agent with its outstanding
+// claim count, computed at render time.
 package agentroom
