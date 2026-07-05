@@ -1,9 +1,29 @@
+# Local agent instructions
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.claude/
+
 # Binaries
 /agentroomd
 /cmd/agentroom/agentroom
 /cmd/agentroomd/agentroomd
+*.exe
 *.test
 *.out
 
-# Scratch
+# Go coverage and profiles
+coverage.*
+*.coverprofile
+*.prof
+
+# Editor and OS files
+.DS_Store
+*.swp
+*.swo
+
+# Local caches and scratch
+.ruff_cache/
 .work/
+tmp/
+dist/

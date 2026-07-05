@@ -13,6 +13,26 @@ The library reads no configuration itself and depends only on
 [`go-redis/v9`](https://github.com/redis/go-redis). The `agentroom` CLI and the
 SessionStart/SessionEnd hooks let shell agents (Claude Code, pi, codex) join a room.
 
+## Quick start (CLI)
+
+Run Redis locally, build the CLI, then post and read one event:
+
+```bash
+go build -o cmd/agentroom/agentroom ./cmd/agentroom
+
+cmd/agentroom/agentroom post AGENT_JOINED \
+  '{"role":"docs-checker","working_on":"smoke test"}' \
+  --agent docs-checker
+
+cmd/agentroom/agentroom who
+cmd/agentroom/agentroom tail --count 5
+cmd/agentroom/agentroom leave --agent docs-checker
+```
+
+By default the CLI connects to Redis at `localhost:6379` and uses the current
+directory name plus `main` as the room namespace. Override those with
+`--addr`, `--repo`, and `--branch` when you need a different room.
+
 ## Install
 
 CLI (build beside its package, symlink onto your PATH):
@@ -45,13 +65,17 @@ basename, so ad-hoc use targets this repo's room.
 |---------|------|
 | `agentroom tail [--count N]` | print recent events |
 | `agentroom who` | list agents currently present (role, claim load, TTL left) |
-| `agentroom post <type> [payload] [--agent ID]` | publish an event (payload free-form) |
+| `agentroom post <type> [payload] [--agent ID --to ID]` | publish an event (payload free-form) |
+| `agentroom wait [--to-me --timeout D]` | block until the next matching event arrives |
+| `agentroom ask <msg> --to ID [--timeout D]` | ask one live agent and block for its correlated reply |
+| `agentroom reply <ask-id> <msg>` | reply to an ask event, automatically targeting the asker |
 | `agentroom catalog` | list registered task types |
 | `agentroom register <type> <desc> [--produces P --requires C]` | advertise a task type |
 | `agentroom open [--count N]` | list unclaimed, undone tasks |
 | `agentroom claim <id> [--agent ID --ttl D]` | atomically take a task |
 | `agentroom done <id> [result]` | mark a task complete |
 | `agentroom welcome` | pin the canonical welcome in the lobby (no expiry) |
+| `agentroom leave [--agent ID]` | clear this agent's presence immediately |
 | `agentroom hook session-start\|user-prompt-submit\|session-end` | Claude Code hook entrypoint |
 
 **Posting to the global lobby.** Every room is repo/branch-scoped, but one shared
@@ -132,11 +156,28 @@ agentroom post AGENT_JOINED '{"role":"go-fixer","working_on":"flaky parser tests
 Before touching a shared file, see who else is live and what's already in flight:
 
 ```bash
+agentroom who             # live roster with role, claim load, and TTL left
 agentroom tail --count 20   # recent activity — what's happening right now
 agentroom open              # unclaimed work you could pick up
 ```
 
 If another agent is here and you're both near the same files, claim before you start.
+
+### Ask one live agent and wait
+
+Use `ask` when you need a specific live agent to answer before you continue. It
+targets one roster entry, publishes an `ASK`, and blocks until that same agent
+replies to the ask entry ID:
+
+```bash
+agentroom ask "can you review PR 42 before I merge?" --agent fixer-1 --to reviewer-1 --timeout 10m
+
+# In reviewer-1's session, after seeing the ASK entry ID:
+agentroom reply 1718900000000-0 '{"status":"approved"}' --agent reviewer-1
+```
+
+`--to` must match exactly one live agent. Ambiguous prefixes fail with candidate
+IDs, and one asking agent can hold only one pending ask in a room.
 
 ### Claim shared work so two agents don't collide
 
@@ -376,8 +417,23 @@ room.Publish(ctx, ev)
 msgs, _ := room.Directed(ctx, "reviewer-1", 20) // events addressed to reviewer-1, newest-first
 ```
 
-Library-only for now — there is no `post --to` CLI flag yet; broadcast `post`
-remains the shell path.
+The CLI can send and wait for directed messages too. `post --to` accepts a
+room key such as `repo:branch`, an exact live roster ID, or a unique roster
+prefix such as `reviewer-1`. Ambiguous prefixes are rejected with candidates.
+Agent-directed CLI posts are also copied to a durable per-recipient Redis inbox,
+so an offline recipient can receive them on the next SessionStart/UserPromptSubmit
+even after the normal room stream has rolled past the replay window. Room-key
+targets such as `repo:branch` stay stream-only.
+
+```bash
+agentroom wait --to-me --agent reviewer-1
+agentroom post REVIEW_REQUEST '{"pr":42}' --agent fixer-1 --to reviewer-1
+```
+
+For synchronous request/response, use `ask`/`reply` from the playbook above.
+It is the CLI wrapper around the same `To` + `ReplyTo` fields: `ask` waits for a
+`REPLY` whose `ReplyTo` matches the ask entry ID and whose sender is the
+requested agent.
 
 ### Configuration
 
@@ -390,6 +446,11 @@ fallbacks below; override per environment. The library never reads config itself
 | `RepoID` | `""` | Namespace component — set per repo |
 | `BranchName` | `""` | Namespace component — set per branch |
 | `StreamTTL` | `48h` | Idle expiry refreshed on each publish |
+| `StreamMaxLen` | `10000` | Approximate stream length cap applied at publish |
+| `MaxPayloadBytes` | `16384` | Maximum per-event payload accepted by `Publish` |
+| `InboxMaxLen` | `1000` | Approximate per-recipient directed inbox length cap |
+| `InboxTTL` | `720h` | Directed inbox idle expiry refreshed on enqueue |
+| `InboxCursorTTL` | `720h` | Per-recipient inbox cursor expiry after delivery |
 | `ArchiveThreshold` | `10000` | Stream length at/above which the Archiver compacts |
 | `Group` | `agents` | Consumer-group name (set one per worker type) |
 | `PresenceTTL` | `15m` | Per-agent presence key expiry after last activity |
@@ -397,7 +458,8 @@ fallbacks below; override per environment. The library never reads config itself
 | `JoinReplayWindow` | `10m` | On join, replay events this far back so a fresh session sees a peer's just-landed events (≤0 = baseline to tail) |
 
 Keys are namespaced: `repo:<RepoID>:<BranchName>:events` (stream),
-`...:state:<key>` (scratchpad), `...:catalog` (task catalog),
+`...:state:<key>` (scratchpad), `...:inbox:<recipient>` (directed inbox),
+`...:inboxcursor:<recipient>` (directed inbox cursor), `...:catalog` (task catalog),
 `...:task:<id>:{owner,done}` (task coordination).
 
 ### Scratchpad
