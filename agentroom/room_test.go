@@ -156,6 +156,98 @@ func TestInboxRoundTripAndCursor(t *testing.T) {
 	}
 }
 
+func TestEventByIDReturnsExactEvent(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	ctx := context.Background()
+
+	first := &Event{Type: "ASK", AgentID: "asker", To: "reviewer", Payload: []byte("question")}
+	if err := room.Publish(ctx, first); err != nil {
+		t.Fatalf("publish first: %v", err)
+	}
+	if err := room.Publish(ctx, &Event{Type: "NOISE", AgentID: "other"}); err != nil {
+		t.Fatalf("publish noise: %v", err)
+	}
+
+	got, ok, err := room.EventByID(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("event by id: %v", err)
+	}
+	if !ok {
+		t.Fatal("EventByID returned ok=false for published event")
+	}
+	if got.ID != first.ID || got.Type != "ASK" || got.AgentID != "asker" || got.To != "reviewer" || string(got.Payload) != "question" {
+		t.Fatalf("EventByID = %+v, want first event", got)
+	}
+
+	_, ok, err = room.EventByID(ctx, "9999999999999-0")
+	if err != nil {
+		t.Fatalf("event by missing id: %v", err)
+	}
+	if ok {
+		t.Fatal("EventByID returned ok=true for missing event")
+	}
+}
+
+func TestBeginAskLeaseRejectsConcurrentAndEndAskIsTokenSafe(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	ctx := context.Background()
+	const agent = "asker-1"
+
+	ok, err := room.BeginAsk(ctx, agent, "token-a", time.Minute)
+	if err != nil {
+		t.Fatalf("begin ask: %v", err)
+	}
+	if !ok {
+		t.Fatal("first BeginAsk returned false")
+	}
+	ok, err = room.BeginAsk(ctx, agent, "token-b", time.Minute)
+	if err != nil {
+		t.Fatalf("begin concurrent ask: %v", err)
+	}
+	if ok {
+		t.Fatal("second BeginAsk returned true, want singleton lease rejection")
+	}
+
+	if err := room.EndAsk(ctx, agent, "wrong-token"); err != nil {
+		t.Fatalf("end ask wrong token: %v", err)
+	}
+	ok, err = room.BeginAsk(ctx, agent, "token-c", time.Minute)
+	if err != nil {
+		t.Fatalf("begin after wrong-token end: %v", err)
+	}
+	if ok {
+		t.Fatal("wrong-token EndAsk deleted the active lease")
+	}
+
+	if err := room.EndAsk(ctx, agent, "token-a"); err != nil {
+		t.Fatalf("end ask: %v", err)
+	}
+	ok, err = room.BeginAsk(ctx, agent, "token-d", time.Minute)
+	if err != nil {
+		t.Fatalf("begin after end: %v", err)
+	}
+	if !ok {
+		t.Fatal("BeginAsk after matching EndAsk returned false")
+	}
+
+	mr.FastForward(time.Minute + time.Second)
+	ok, err = room.BeginAsk(ctx, agent, "token-e", time.Minute)
+	if err != nil {
+		t.Fatalf("begin after ttl expiry: %v", err)
+	}
+	if !ok {
+		t.Fatal("BeginAsk after TTL expiry returned false")
+	}
+}
+
 func TestWaitReturnsNextEventWithoutConsumerGroup(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
