@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -147,22 +147,28 @@ func TestCoreCLICommandsAgainstMiniredis(t *testing.T) {
 	t.Cleanup(func() { newRedisClient = orig })
 
 	ctx := context.Background()
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "register", "PATCH_READY", "patch can be reviewed", "--produces", "REVIEWED", "--requires", "reviewer"); err != nil {
+	runCoreCLICommandSequence(t, ctx, mr.Addr())
+	runCoreCLIWaitSmoke(t, ctx, mr.Addr())
+}
+
+func runCoreCLICommandSequence(t *testing.T, ctx context.Context, addr string) {
+	t.Helper()
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "register", "PATCH_READY", "patch can be reviewed", "--produces", "REVIEWED", "--requires", "reviewer"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "catalog"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "catalog"); err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "post", "PATCH_READY", `{"pr":42}`, "--agent", "builder"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "post", "PATCH_READY", `{"pr":42}`, "--agent", "builder"); err != nil {
 		t.Fatalf("post task: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "open"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "open"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	t.Cleanup(func() { _ = rdb.Close() })
-	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "cli-core", "test"))
+	room := agentroom.NewRoom(rdb, roomCfg(addr, "cli-core", "test"))
 	events, err := room.Recent(ctx, 10)
 	if err != nil {
 		t.Fatalf("recent: %v", err)
@@ -172,28 +178,31 @@ func TestCoreCLICommandsAgainstMiniredis(t *testing.T) {
 	}
 	taskID := events[len(events)-1].ID
 
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "claim", taskID, "--agent", "reviewer", "--ttl", "1m"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "claim", taskID, "--agent", "reviewer", "--ttl", "1m"); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "done", taskID, `{"status":"ok"}`, "--agent", "reviewer"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "done", taskID, `{"status":"ok"}`, "--agent", "reviewer"); err != nil {
 		t.Fatalf("done: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "tail", "--count", "5", "--agent", "observer"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "tail", "--count", "5", "--agent", "observer"); err != nil {
 		t.Fatalf("tail: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "who", "--agent", "observer"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "who", "--agent", "observer"); err != nil {
 		t.Fatalf("who: %v", err)
 	}
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "welcome"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "welcome"); err != nil {
 		t.Fatalf("welcome: %v", err)
 	}
+}
 
+func runCoreCLIWaitSmoke(t *testing.T, ctx context.Context, addr string) {
+	t.Helper()
 	errc := make(chan error, 1)
 	go func() {
-		errc <- runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "wait", "--timeout", "2s")
+		errc <- runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "wait", "--timeout", "2s")
 	}()
 	time.Sleep(25 * time.Millisecond)
-	if err := runCLI(ctx, mr.Addr(), "--repo", "cli-core", "--branch", "test", "post", "WAKE", `{"ok":true}`, "--agent", "builder"); err != nil {
+	if err := runCLI(ctx, addr, "--repo", "cli-core", "--branch", "test", "post", "WAKE", `{"ok":true}`, "--agent", "builder"); err != nil {
 		t.Fatalf("post wake: %v", err)
 	}
 	select {

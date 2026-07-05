@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 )
 
 func TestLogWorkerIdentityInterestsAndExecute(t *testing.T) {

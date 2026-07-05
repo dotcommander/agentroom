@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -91,7 +91,12 @@ func TestWaitForReplyTimeout(t *testing.T) {
 		t.Fatalf("publish ask: %v", err)
 	}
 
-	_, err := waitForReply(ctx, room, ask.ID, "replier", "asker", time.Millisecond)
+	_, err := waitForReply(ctx, room, replyWait{
+		AskID:             ask.ID,
+		ExpectedSender:    "replier",
+		ExpectedRecipient: "asker",
+		Timeout:           time.Millisecond,
+	})
 	if err == nil || !strings.Contains(err.Error(), "ask timed out") {
 		t.Fatalf("waitForReply error = %v, want timeout", err)
 	}

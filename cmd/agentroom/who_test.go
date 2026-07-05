@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 )
 
 func zeroClaims(string) int { return 0 }

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -529,7 +529,7 @@ func TestDeltasSeedCursorWhenMissingWithoutInjectingBacklog(t *testing.T) {
 	if cursor, err := local.ReadCursor(ctx, "missing-local"); err != nil || cursor == "" {
 		t.Fatalf("local cursor after missing-cursor delta = %q, err=%v", cursor, err)
 	}
-	lobbyOut := lobbyDelta(ctx, rdb, mr.Addr(), "repo", "main", "missing-lobby", "self")
+	lobbyOut := lobbyDelta(ctx, rdb, roomRef{Addr: mr.Addr(), Repo: "repo", Branch: "main"}, "missing-lobby", "self")
 	if lobbyOut != "" {
 		t.Fatalf("lobbyDelta with missing cursor injected backlog: %q", lobbyOut)
 	}
@@ -569,6 +569,13 @@ func TestBuildDigestIncludesPresenceInboxAndOpenTasks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires redis (miniredis)")
 	}
+	got := buildDigestForTest(t)
+	assertDigestContent(t, got)
+	assertDigestOrder(t, got)
+}
+
+func buildDigestForTest(t *testing.T) string {
+	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
@@ -598,7 +605,12 @@ func TestBuildDigestIncludesPresenceInboxAndOpenTasks(t *testing.T) {
 	}
 	t.Setenv("AGENTROOM_AGENT", "gary")
 
-	got := buildDigest(ctx, rdb, mr.Addr(), "repo", "main", "sess1234")
+	got := buildDigest(ctx, rdb, roomRef{Addr: mr.Addr(), Repo: "repo", Branch: "main"}, "sess1234")
+	return got
+}
+
+func assertDigestContent(t *testing.T, got string) {
+	t.Helper()
 	for _, want := range []string{
 		"agentroom -- shared agent mesh (this room: repo:main)",
 		"peer-1 -- reviewer: ask smoke",
@@ -612,10 +624,14 @@ func TestBuildDigestIncludesPresenceInboxAndOpenTasks(t *testing.T) {
 	if strings.Contains(got, "Sign in -- tell the room") {
 		t.Fatalf("digest still contains sign-in banner:\n%s", got)
 	}
+}
+
+func assertDigestOrder(t *testing.T, got string) {
+	t.Helper()
 	inboxAt := strings.Index(got, "1 directed message(s) for you")
 	tasksAt := strings.Index(got, "== claimable tasks ==")
 	rosterAt := strings.Index(got, "== who's here")
-	if inboxAt == -1 || tasksAt == -1 || rosterAt == -1 || !(inboxAt < tasksAt && tasksAt < rosterAt) {
+	if inboxAt == -1 || tasksAt == -1 || rosterAt == -1 || inboxAt >= tasksAt || tasksAt >= rosterAt {
 		t.Fatalf("digest order = inbox:%d tasks:%d roster:%d\n%s", inboxAt, tasksAt, rosterAt, got)
 	}
 }
