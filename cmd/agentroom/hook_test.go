@@ -2,14 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/dotcommander/agentchat/agentroom"
 	"github.com/redis/go-redis/v9"
 )
+
+type hookOutput struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
 
 func TestExtractText(t *testing.T) {
 	t.Parallel()
@@ -52,6 +63,55 @@ func TestDeltaDigest(t *testing.T) {
 	}
 	if !strings.Contains(got, "AGENT_JOINED  ?") {
 		t.Errorf("missing empty-agent fallback: %q", got)
+	}
+}
+
+func TestHookSmallHelpers(t *testing.T) {
+	t.Parallel()
+	if got := openLines(nil); len(got) != 1 || got[0] != "(none)" {
+		t.Fatalf("openLines(nil) = %#v, want none marker", got)
+	}
+	gotOpen := openLines([]agentroom.Task{{ID: "1-0", Type: "PATCH_READY"}})
+	if len(gotOpen) != 1 || !strings.Contains(gotOpen[0], "1-0  PATCH_READY") {
+		t.Fatalf("openLines(task) = %#v", gotOpen)
+	}
+	if got := firstUserText([]byte(`{"message":{"role":"assistant","content":"ignore"}}`)); got != "" {
+		t.Fatalf("assistant firstUserText = %q, want empty", got)
+	}
+	if got := firstUserText([]byte(`{"message":{"role":"user","content":[{"type":"text","text":"hello from array"}]}}`)); got != "hello from array" {
+		t.Fatalf("array firstUserText = %q", got)
+	}
+	if got := shortSession("123456789abcdef"); got != "12345678" {
+		t.Fatalf("shortSession long = %q", got)
+	}
+	if got := shortSession(""); got != "session" {
+		t.Fatalf("shortSession empty = %q", got)
+	}
+}
+
+func TestTranscriptSummary(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	data := strings.Join([]string{
+		`{"message":{"role":"assistant","content":"setup"}}`,
+		`{"message":{"role":"user","content":"review the parser"}}`,
+		`{"message":{"role":"user","content":[{"type":"text","text":"second ask"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ask, entries := transcriptSummary(path)
+	if ask != "review the parser" {
+		t.Fatalf("ask = %q, want first user text", ask)
+	}
+	if entries != 3 {
+		t.Fatalf("entries = %d, want 3", entries)
+	}
+
+	ask, entries = transcriptSummary(filepath.Join(t.TempDir(), "missing.jsonl"))
+	if ask != "" || entries != 0 {
+		t.Fatalf("missing transcript = (%q, %d), want empty", ask, entries)
 	}
 }
 
@@ -109,6 +169,327 @@ func TestHookGuardsEmptySessionID(t *testing.T) {
 	}
 }
 
+func TestSessionStartSeedsPresenceLobbyAndCursors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin override")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	const sessionID = "abcdef123456"
+	if err := runCLIWithStdin(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "session-start"); err != nil {
+		t.Fatalf("session-start: %v", err)
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	local := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
+	pres, err := local.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	if _, ok := pres[shortSession(sessionID)]; !ok {
+		t.Fatalf("session presence missing: %v", pres)
+	}
+	if cursor, err := local.ReadCursor(ctx, sessionID); err != nil || cursor == "" {
+		t.Fatalf("local cursor = %q, err=%v", cursor, err)
+	}
+	lobby := lobbyRoom(rdb, mr.Addr())
+	if cursor, err := lobby.ReadCursor(ctx, sessionID); err != nil || cursor == "" {
+		t.Fatalf("lobby cursor = %q, err=%v", cursor, err)
+	}
+	lobbyEvents, err := lobby.Recent(ctx, 10)
+	if err != nil {
+		t.Fatalf("lobby recent: %v", err)
+	}
+	if len(lobbyEvents) == 0 || lobbyEvents[len(lobbyEvents)-1].Type != "AGENT_JOINED" {
+		t.Fatalf("lobby events = %+v, want AGENT_JOINED", lobbyEvents)
+	}
+}
+
+func TestSessionStartEmitsDigestJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin/stdout override")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, _ := os.Getwd()
+	const sessionID = "digest123456"
+	out, err := runCLIWithStdinOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "session-start")
+	if err != nil {
+		t.Fatalf("session-start: %v", err)
+	}
+	var got hookOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+		t.Fatalf("session-start output is not JSON: %v\n%s", err, out)
+	}
+	if got.HookSpecificOutput.HookEventName != "SessionStart" {
+		t.Fatalf("hook event = %q, want SessionStart", got.HookSpecificOutput.HookEventName)
+	}
+	for _, want := range []string{
+		"agentroom -- shared agent mesh",
+		"Sign in -- tell the room who you are",
+		"== who's here",
+		"== open tasks you could claim ==",
+	} {
+		if !strings.Contains(got.HookSpecificOutput.AdditionalContext, want) {
+			t.Fatalf("SessionStart context missing %q:\n%s", want, got.HookSpecificOutput.AdditionalContext)
+		}
+	}
+}
+
+func TestSessionEndPublishesSummaryAndClearsPresence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin override")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	const sessionID = "fedcba987654"
+	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"message":{"role":"user","content":"finish coverage"}}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
+	if err := room.Heartbeat(ctx, shortSession(sessionID), "worker", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	input := `{"session_id":"` + sessionID + `","cwd":"` + wd + `","transcript_path":"` + transcript + `"}`
+	if err := runCLIWithStdin(ctx, mr.Addr(), input, "hook", "session-end"); err != nil {
+		t.Fatalf("session-end: %v", err)
+	}
+
+	events, err := room.Recent(ctx, 10)
+	if err != nil {
+		t.Fatalf("recent: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != "SESSION_ENDED" {
+		t.Fatalf("events = %+v, want SESSION_ENDED", events)
+	}
+	if !strings.Contains(string(events[len(events)-1].Payload), "finish coverage") {
+		t.Fatalf("session payload missing transcript summary: %s", events[len(events)-1].Payload)
+	}
+	pres, err := room.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	if _, ok := pres[shortSession(sessionID)]; ok {
+		t.Fatalf("presence still contains ended session: %v", pres)
+	}
+}
+
+func TestUserPromptSubmitAdvancesLocalAndLobbyCursors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin override")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	const sessionID = "112233445566"
+	selfID := shortSession(sessionID)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	local := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
+	lobby := lobbyRoom(rdb, mr.Addr())
+	if err := local.WriteCursor(ctx, sessionID, "0-0", local.Config().CursorTTL); err != nil {
+		t.Fatalf("write local cursor: %v", err)
+	}
+	if err := lobby.WriteCursor(ctx, sessionID, "0-0", lobby.Config().CursorTTL); err != nil {
+		t.Fatalf("write lobby cursor: %v", err)
+	}
+	localEvent := &agentroom.Event{Type: "WORK_COMPLETED", AgentID: "peer", Payload: []byte(`{"ok":true}`)}
+	if err := local.Publish(ctx, localEvent); err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	lobbyEvent := &agentroom.Event{Type: "ANNOUNCEMENT", AgentID: "peer", Payload: []byte(`{"msg":"hi"}`)}
+	if err := lobby.Publish(ctx, lobbyEvent); err != nil {
+		t.Fatalf("publish lobby: %v", err)
+	}
+
+	if err := runCLIWithStdin(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "user-prompt-submit"); err != nil {
+		t.Fatalf("user-prompt-submit: %v", err)
+	}
+	if cursor, err := local.ReadCursor(ctx, sessionID); err != nil || cursor != localEvent.ID {
+		t.Fatalf("local cursor = %q, err=%v, want %q", cursor, err, localEvent.ID)
+	}
+	if cursor, err := lobby.ReadCursor(ctx, sessionID); err != nil || cursor != lobbyEvent.ID {
+		t.Fatalf("lobby cursor = %q, err=%v, want %q", cursor, err, lobbyEvent.ID)
+	}
+	pres, err := local.Presence(ctx)
+	if err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	if _, ok := pres[selfID]; !ok {
+		t.Fatalf("prompt submit did not refresh session presence: %v", pres)
+	}
+}
+
+func TestUserPromptSubmitEmitsComposedAdditionalContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin/stdout override")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, _ := os.Getwd()
+	repo, branch := resolveRoom(ctx, wd)
+	const sessionID = "aabbccddeeff"
+	selfID := shortSession(sessionID)
+	t.Setenv("AGENTROOM_AGENT", "gary")
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	local := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
+	lobby := lobbyRoom(rdb, mr.Addr())
+	if err := local.WriteCursor(ctx, sessionID, "0-0", local.Config().CursorTTL); err != nil {
+		t.Fatalf("write local cursor: %v", err)
+	}
+	if err := lobby.WriteCursor(ctx, sessionID, "0-0", lobby.Config().CursorTTL); err != nil {
+		t.Fatalf("write lobby cursor: %v", err)
+	}
+	directed := &agentroom.Event{Type: "REVIEW_REQUEST", AgentID: "alice", To: "gary-" + selfID, Payload: []byte(`{"pr":42}`)}
+	if err := local.Publish(ctx, directed); err != nil {
+		t.Fatalf("publish directed: %v", err)
+	}
+	if err := local.EnqueueInbox(ctx, "gary", *directed); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+	localEvent := &agentroom.Event{Type: "WORK_COMPLETED", AgentID: "builder", Payload: []byte(`{"status":"green"}`)}
+	if err := local.Publish(ctx, localEvent); err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	lobbyEvent := &agentroom.Event{Type: "ANNOUNCEMENT", AgentID: "peer", Payload: []byte(`{"msg":"global"}`)}
+	if err := lobby.Publish(ctx, lobbyEvent); err != nil {
+		t.Fatalf("publish lobby: %v", err)
+	}
+
+	out, err := runCLIWithStdinOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "user-prompt-submit")
+	if err != nil {
+		t.Fatalf("user-prompt-submit: %v", err)
+	}
+	var got hookOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+		t.Fatalf("user-prompt-submit output is not JSON: %v\n%s", err, out)
+	}
+	if got.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+		t.Fatalf("hook event = %q, want UserPromptSubmit", got.HookSpecificOutput.HookEventName)
+	}
+	ctxText := got.HookSpecificOutput.AdditionalContext
+	for _, want := range []string{
+		"agentroom -- 1 directed message(s) for you:",
+		"REVIEW_REQUEST  alice  ->gary-" + selfID,
+		"agentroom -- 1 new event(s) in " + repo + ":" + branch,
+		"WORK_COMPLETED  builder",
+		"agentroom -- 1 cross-repo message(s) for you",
+		"ANNOUNCEMENT  peer",
+	} {
+		if !strings.Contains(ctxText, want) {
+			t.Fatalf("UserPromptSubmit context missing %q:\n%s", want, ctxText)
+		}
+	}
+	if strings.Count(ctxText, "REVIEW_REQUEST") != 1 {
+		t.Fatalf("directed inbox event duplicated in local delta:\n%s", ctxText)
+	}
+}
+
+func TestDeltasSeedCursorWhenMissingWithoutInjectingBacklog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	ctx := context.Background()
+	local := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "repo", "main"))
+	lobby := lobbyRoom(rdb, mr.Addr())
+	if err := local.Publish(ctx, &agentroom.Event{Type: "OLD_LOCAL", AgentID: "peer"}); err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	if err := lobby.Publish(ctx, &agentroom.Event{Type: "OLD_LOBBY", AgentID: "peer"}); err != nil {
+		t.Fatalf("publish lobby: %v", err)
+	}
+
+	localOut := localDelta(ctx, local, localDeltaOptions{SessionID: "missing-local", Repo: "repo", Branch: "main"})
+	if localOut != "" {
+		t.Fatalf("localDelta with missing cursor injected backlog: %q", localOut)
+	}
+	if cursor, err := local.ReadCursor(ctx, "missing-local"); err != nil || cursor == "" {
+		t.Fatalf("local cursor after missing-cursor delta = %q, err=%v", cursor, err)
+	}
+	lobbyOut := lobbyDelta(ctx, rdb, mr.Addr(), "repo", "main", "missing-lobby", "self")
+	if lobbyOut != "" {
+		t.Fatalf("lobbyDelta with missing cursor injected backlog: %q", lobbyOut)
+	}
+	if cursor, err := lobby.ReadCursor(ctx, "missing-lobby"); err != nil || cursor == "" {
+		t.Fatalf("lobby cursor after missing-cursor delta = %q, err=%v", cursor, err)
+	}
+}
+
 func TestLobbyDigest(t *testing.T) {
 	t.Parallel()
 	events := []agentroom.Event{
@@ -133,6 +514,52 @@ func TestLobbyDigest(t *testing.T) {
 	}
 	if !strings.Contains(got, "tail --repo lobby") {
 		t.Errorf("missing lobby feed hint: %q", got)
+	}
+}
+
+func TestBuildDigestIncludesPresenceInboxAndOpenTasks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	ctx := context.Background()
+	room := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), "repo", "main"))
+	if err := room.Heartbeat(ctx, "peer-1", "reviewer: ask smoke", time.Minute); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if err := room.RegisterTask(ctx, agentroom.TaskDef{Type: "PATCH_READY", Description: "patch ready"}); err != nil {
+		t.Fatalf("register task: %v", err)
+	}
+	task := &agentroom.Event{Type: "PATCH_READY", AgentID: "builder", Payload: []byte(`{"pr":42}`)}
+	if err := room.Publish(ctx, task); err != nil {
+		t.Fatalf("publish task: %v", err)
+	}
+	msg := &agentroom.Event{Type: "MSG", AgentID: "alice", To: "gary", Payload: []byte(`{"m":1}`)}
+	if err := room.Publish(ctx, msg); err != nil {
+		t.Fatalf("publish msg: %v", err)
+	}
+	if err := room.EnqueueInbox(ctx, "gary", *msg); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+	t.Setenv("AGENTROOM_AGENT", "gary")
+
+	got := buildDigest(ctx, rdb, mr.Addr(), "repo", "main", "sess1234")
+	for _, want := range []string{
+		"agentroom -- shared agent mesh (this room: repo:main)",
+		"peer-1 -- reviewer: ask smoke",
+		"1 directed message(s) for you",
+		"PATCH_READY",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("digest missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -231,4 +658,54 @@ func TestLocalDeltaSkipsInboxDeliveredSource(t *testing.T) {
 	if cursor != ev.ID {
 		t.Fatalf("local cursor = %q, want %q", cursor, ev.ID)
 	}
+}
+
+func runCLIWithStdin(ctx context.Context, addr, input string, args ...string) error {
+	_, err := runCLIWithStdinOutput(ctx, addr, input, args...)
+	return err
+}
+
+func runCLIWithStdinOutput(ctx context.Context, addr, input string, args ...string) (string, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = origStdin
+		_ = r.Close()
+	}()
+	if _, err := w.Write([]byte(input)); err != nil {
+		_ = w.Close()
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	origStdout := os.Stdout
+	os.Stdout = outW
+	defer func() {
+		os.Stdout = origStdout
+		_ = outR.Close()
+	}()
+
+	runErr := runCLI(ctx, addr, args...)
+	closeErr := outW.Close()
+	data, readErr := io.ReadAll(outR)
+	if runErr != nil {
+		return string(data), runErr
+	}
+	if closeErr != nil {
+		return string(data), closeErr
+	}
+	if readErr != nil {
+		return string(data), readErr
+	}
+	return string(data), nil
 }
