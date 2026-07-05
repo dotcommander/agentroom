@@ -45,11 +45,11 @@ ln -sf "$(pwd)/cmd/agentroom/agentroom" ~/go/bin/agentroom
 Library:
 
 ```bash
-go get github.com/dotcommander/agentchat/agentroom
+go get github.com/dotcommander/agentroom/agentroom
 ```
 
 ```go
-import "github.com/dotcommander/agentchat/agentroom"
+import "github.com/dotcommander/agentroom/agentroom"
 ```
 
 Requires Go 1.26+ and Redis 6.2+ (consumer groups need 5.0; `XAUTOCLAIM` needs 6.2).

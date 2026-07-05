@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// NewClient is the single hardened constructor every agentchat process uses to
+// NewClient is the single hardened constructor every agentroom process uses to
 // obtain its redis client. It applies bounded dial/read/write timeouts so a hung
 // (not down) Redis cannot stall a session, an explicit connection pool, and
 // optional auth/TLS read from the environment (off by default):
@@ -29,7 +29,7 @@ func NewClient(addr string) *redis.Client {
 		PoolSize:     10,
 		MinIdleConns: 1,
 		MaxRetries:   3,
-		Password:     os.Getenv("REDIS_PASSWORD"),
+		Password:     YOUR_PASSWORD"REDIS_PASSWORD"),
 	}
 	switch strings.ToLower(os.Getenv("REDIS_TLS")) {
 	case "1", "true", "yes":

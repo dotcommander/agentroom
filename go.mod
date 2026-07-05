@@ -1,4 +1,4 @@
-module github.com/dotcommander/agentchat
+module github.com/dotcommander/agentroom
 
 go 1.26.0
 
