@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/spf13/cobra"
 )
+
+const ttlExpiring = "expiring"
 
 // whoCmd prints the live roster on demand -- the gap the SessionStart digest
 // left, since that digest only renders into the hook JSON channel and shows
@@ -83,7 +85,7 @@ func whoLine(id string, e agentroom.PresenceEntry, width, claims int, isSelf boo
 // the key has no expiry left (about to drop), shown as "expiring".
 func humanTTL(d time.Duration) string {
 	if d <= 0 {
-		return "expiring"
+		return ttlExpiring
 	}
 	return d.Round(time.Second).String()
 }

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 )
 
 // presenceValue is the render-time view of one roster entry: the agent's free-form

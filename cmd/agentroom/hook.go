@@ -10,10 +10,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 )
+
+const (
+	eventAgentJoined  = "AGENT_JOINED"
+	eventSessionEnded = "SESSION_ENDED"
+	summaryKeySession = "session"
+)
+
+type roomRef struct {
+	Addr   string
+	Repo   string
+	Branch string
+}
 
 // sessionStartInput is the subset of the SessionStart hook stdin we use.
 type sessionStartInput struct {
@@ -52,14 +64,15 @@ func sessionStart(c *cobra.Command) error {
 		return nil
 	}
 	repo, branch := resolveRoom(c.Context(), in.CWD)
+	ref := roomRef{Addr: addr, Repo: repo, Branch: branch}
 	selfID := shortSession(in.SessionID)
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
-	joinLobby(c.Context(), rdb, addr, repo, branch, in.SessionID)
-	writeLocalHeartbeat(c.Context(), rdb, addr, repo, branch, selfID)
-	seedCursor(c.Context(), rdb, addr, repo, branch, in.SessionID)
+	joinLobby(c.Context(), rdb, ref, in.SessionID)
+	writeLocalHeartbeat(c.Context(), rdb, ref, selfID)
+	seedCursor(c.Context(), rdb, ref, in.SessionID)
 	seedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
-	digest := buildDigest(c.Context(), rdb, addr, repo, branch, selfID)
+	digest := buildDigest(c.Context(), rdb, ref, selfID)
 	if digest == "" {
 		return nil
 	}
@@ -92,8 +105,8 @@ func readSessionInput() sessionStartInput {
 // presence keys) plus open tasks. Returns "" if redis is unreachable
 // so the session is never blocked. The noisy lobby and raw recent-activity
 // feeds are intentionally omitted — use `agentroom tail` for the full feed.
-func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, selfID string) string {
-	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+func buildDigest(ctx context.Context, rdb *redis.Client, ref roomRef, selfID string) string {
+	local := agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch))
 
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
@@ -106,7 +119,7 @@ func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, sel
 	}
 	open, _ := local.OpenTasks(ctx, 50)
 
-	lines := []string{fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", repo, branch)}
+	lines := []string{fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", ref.Repo, ref.Branch)}
 	recipients := inboxRecipientsForSession(ctx, local, selfID)
 	if s, _ := inboxDelta(ctx, local, recipients); s != "" {
 		lines = append(lines, "", s)
@@ -123,18 +136,18 @@ func buildDigest(ctx context.Context, rdb *redis.Client, addr, repo, branch, sel
 // session is visible cross-repo, recording which local room it belongs to. It
 // publishes with StreamTTL=0 so it never re-arms expiry on the persistent lobby
 // stream (the welcome banner relies on that). Never fails the session.
-func joinLobby(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
-	cfg := roomCfg(addr, lobbyRepo, defaultBranch)
+func joinLobby(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID string) {
+	cfg := roomCfg(ref.Addr, lobbyRepo, defaultBranch)
 	cfg.StreamTTL = 0
 	lobby := agentroom.NewRoom(rdb, cfg)
-	payload, err := json.Marshal(map[string]any{"room": fmt.Sprintf("%s:%s", repo, branch)})
+	payload, err := json.Marshal(map[string]any{"room": fmt.Sprintf("%s:%s", ref.Repo, ref.Branch)})
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
 	_ = lobby.Publish(ctx, &agentroom.Event{
-		Type:    "AGENT_JOINED",
+		Type:    eventAgentJoined,
 		AgentID: shortSession(sessionID),
 		Payload: payload,
 	})
@@ -144,8 +157,8 @@ func joinLobby(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessi
 // room with a TTL key, so it appears in "who's here" without depending on the
 // event fold. The description starts empty; a later `post AGENT_JOINED` refreshes
 // it with role/working_on. Never fails the session.
-func writeLocalHeartbeat(ctx context.Context, rdb *redis.Client, addr, repo, branch, agentID string) {
-	local := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
+func writeLocalHeartbeat(ctx context.Context, rdb *redis.Client, ref roomRef, agentID string) {
+	local := agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch))
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
 	writeHeartbeat(ctx, local, agentID, "")
@@ -199,7 +212,7 @@ func sessionEnd(c *cobra.Command) error {
 	defer func() { _ = rdb.Close() }()
 	room := agentroom.NewRoom(rdb, roomCfg(addr, repo, branch))
 
-	summary := map[string]any{"session": shortSession(in.SessionID), "entries": entries}
+	summary := map[string]any{summaryKeySession: shortSession(in.SessionID), "entries": entries}
 	if ask != "" {
 		summary["worked_on"] = ask
 	}
@@ -210,7 +223,7 @@ func sessionEnd(c *cobra.Command) error {
 	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
 	defer cancel()
 	_ = room.Publish(ctx, &agentroom.Event{
-		Type:    "SESSION_ENDED",
+		Type:    eventSessionEnded,
 		AgentID: shortSession(in.SessionID),
 		Payload: payload,
 	})
@@ -307,8 +320,8 @@ const (
 // seedCursor sets this session's read cursor to the current stream tail so the
 // first UserPromptSubmit delta covers only events published after session start, never
 // the full backlog. Best-effort: never fails the session.
-func seedCursor(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID string) {
-	seedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(addr, repo, branch)), sessionID)
+func seedCursor(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID string) {
+	seedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), sessionID)
 }
 
 // joinCursor picks a new session's initial read cursor: replay the last
@@ -339,6 +352,7 @@ func userPromptSubmit(c *cobra.Command) error {
 	if in.SessionID == "" {
 		return nil
 	}
+	ref := roomRef{Addr: addr, Repo: repo, Branch: branch}
 	selfID := shortSession(in.SessionID)
 
 	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
@@ -370,7 +384,7 @@ func userPromptSubmit(c *cobra.Command) error {
 	}); s != "" {
 		sections = append(sections, s)
 	}
-	if s := lobbyDelta(ctx, rdb, addr, repo, branch, in.SessionID, selfID); s != "" {
+	if s := lobbyDelta(ctx, rdb, ref, in.SessionID, selfID); s != "" {
 		sections = append(sections, s)
 	}
 	if len(sections) == 0 {

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -197,8 +197,8 @@ func recipientSet(recipients []string) map[string]bool {
 // window so a full lobby backlog is never dumped. Best-effort: never errors, and
 // is bounded by the caller's hookOpTimeout ctx so a slow lobby can't stall the
 // prompt.
-func lobbyDelta(ctx context.Context, rdb *redis.Client, addr, repo, branch, sessionID, selfID string) string {
-	lobby := lobbyRoom(rdb, addr)
+func lobbyDelta(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID, selfID string) string {
+	lobby := lobbyRoom(rdb, ref.Addr)
 	cursor, err := lobby.ReadCursor(ctx, sessionID)
 	if err != nil {
 		return ""
@@ -215,7 +215,7 @@ func lobbyDelta(ctx context.Context, rdb *redis.Client, addr, repo, branch, sess
 	// same lobby spam is never re-scanned on the next prompt.
 	_ = lobby.WriteCursor(ctx, sessionID, events[len(events)-1].ID, lobby.Config().CursorTTL)
 
-	ownRoom := fmt.Sprintf("%s:%s", repo, branch)
+	ownRoom := fmt.Sprintf("%s:%s", ref.Repo, ref.Branch)
 	sig := agentroom.FilterLobby(events, selfID, ownRoom, maxLobbyEvents)
 	if len(sig) == 0 {
 		return ""

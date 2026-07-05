@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
 )
 

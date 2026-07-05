@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotcommander/agentchat/agentroom"
+	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/spf13/cobra"
 )
 
@@ -60,7 +60,12 @@ func askCmd() *cobra.Command {
 			writeHeartbeat(c.Context(), room, agent, "")
 			outf("asked %s as %s (entry %s)\n", to, agent, ev.ID)
 
-			reply, err := waitForReply(c.Context(), room, ev.ID, to, agent, timeout)
+			reply, err := waitForReply(c.Context(), room, replyWait{
+				AskID:             ev.ID,
+				ExpectedSender:    to,
+				ExpectedRecipient: agent,
+				Timeout:           timeout,
+			})
 			if err != nil {
 				return err
 			}
@@ -145,24 +150,31 @@ func resolveLiveTarget(ctx context.Context, room *agentroom.Room, raw string) (s
 	}
 }
 
-func waitForReply(ctx context.Context, room *agentroom.Room, askID, expectedSender, expectedRecipient string, timeout time.Duration) (agentroom.Event, error) {
-	if timeout > 0 {
+type replyWait struct {
+	AskID             string
+	ExpectedSender    string
+	ExpectedRecipient string
+	Timeout           time.Duration
+}
+
+func waitForReply(ctx context.Context, room *agentroom.Room, wait replyWait) (agentroom.Event, error) {
+	if wait.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
+		ctx, cancel = context.WithTimeout(ctx, wait.Timeout)
 		defer cancel()
 	}
-	lastID := askID
+	lastID := wait.AskID
 	for {
 		events, err := room.Wait(ctx, lastID, 2*time.Second, 10)
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && timeout > 0 {
-				return agentroom.Event{}, fmt.Errorf("ask timed out after %s", timeout)
+			if errors.Is(err, context.DeadlineExceeded) && wait.Timeout > 0 {
+				return agentroom.Event{}, fmt.Errorf("ask timed out after %s", wait.Timeout)
 			}
 			return agentroom.Event{}, err
 		}
 		for _, ev := range events {
 			lastID = ev.ID
-			if ev.ReplyTo == askID && ev.AgentID == expectedSender && ev.To == expectedRecipient {
+			if ev.ReplyTo == wait.AskID && ev.AgentID == wait.ExpectedSender && ev.To == wait.ExpectedRecipient {
 				return ev, nil
 			}
 		}
