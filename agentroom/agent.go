@@ -43,13 +43,35 @@ type Worker interface {
 // group; Interests further filters which delivered events the worker acts on —
 // non-matching events are acked and skipped.
 type Runtime struct {
-	room   *Room
-	worker Worker
+	room    *Room
+	worker  Worker
+	onError func(RuntimeError)
 }
 
 // NewRuntime binds a Worker to a Room.
 func NewRuntime(room *Room, worker Worker) *Runtime {
-	return &Runtime{room: room, worker: worker}
+	return NewRuntimeWithOptions(room, worker, RuntimeOptions{})
+}
+
+// RuntimeOptions carries optional Runtime hooks. The zero value preserves
+// NewRuntime's silent, event-driven behavior.
+type RuntimeOptions struct {
+	OnError func(RuntimeError)
+}
+
+// RuntimeError is an operational failure observed by Runtime. It is advisory:
+// Runtime keeps its delivery semantics, while callers can log or count failures.
+type RuntimeError struct {
+	Op      string
+	Stream  string
+	Group   string
+	Message string
+	Err     error
+}
+
+// NewRuntimeWithOptions binds a Worker to a Room with optional observer hooks.
+func NewRuntimeWithOptions(room *Room, worker Worker, opts RuntimeOptions) *Runtime {
+	return &Runtime{room: room, worker: worker, onError: opts.OnError}
 }
 
 // Listen consumes the room stream until ctx is canceled, dispatching matching
@@ -73,6 +95,7 @@ func (rt *Runtime) Listen(ctx context.Context) error {
 		case errors.Is(err, redis.Nil):
 			rt.reclaim(ctx, stream, group)
 		default:
+			rt.observe(RuntimeError{Op: "read_group", Stream: stream, Group: group, Err: err})
 			if !rt.wait(ctx, blockDuration) {
 				return ctx.Err()
 			}
@@ -109,6 +132,7 @@ func (rt *Runtime) handle(ctx context.Context, stream, group string, msg redis.X
 	ev := decodeEvent(msg)
 	if matches(rt.worker.Interests(), ev.Type) {
 		if err := rt.worker.Execute(ctx, ev, rt.room); err != nil {
+			rt.observe(RuntimeError{Op: "execute", Stream: stream, Group: group, Message: msg.ID, Err: err})
 			rt.publishError(ctx, err)
 		}
 	}
@@ -116,7 +140,9 @@ func (rt *Runtime) handle(ctx context.Context, stream, group string, msg redis.X
 	// reclaim()/XAutoClaim recovers, so work is never lost — at worst the
 	// idempotent Execute sees a redelivery. Surfacing the error would ripple
 	// into the Listen/reclaim loop for no correctness gain.
-	_ = rt.room.rdb.XAck(ctx, stream, group, msg.ID).Err()
+	if err := rt.room.rdb.XAck(ctx, stream, group, msg.ID).Err(); err != nil {
+		rt.observe(RuntimeError{Op: "ack", Stream: stream, Group: group, Message: msg.ID, Err: err})
+	}
 }
 
 // reclaim recovers entries left pending by crashed consumers in this group.
@@ -130,6 +156,7 @@ func (rt *Runtime) reclaim(ctx context.Context, stream, group string) {
 		Count:    10,
 	}).Result()
 	if err != nil {
+		rt.observe(RuntimeError{Op: "reclaim", Stream: stream, Group: group, Err: err})
 		return
 	}
 	for _, msg := range msgs {
@@ -146,11 +173,19 @@ func (rt *Runtime) publishError(ctx context.Context, execErr error) {
 	if err != nil {
 		payload = json.RawMessage(`{"error":"marshal failed"}`)
 	}
-	_ = rt.room.Publish(ctx, &Event{
+	if err := rt.room.Publish(ctx, &Event{
 		Type:    EventEngineRuntimeError,
 		AgentID: rt.worker.ID(),
 		Payload: payload,
-	})
+	}); err != nil {
+		rt.observe(RuntimeError{Op: "publish_error", Err: err})
+	}
+}
+
+func (rt *Runtime) observe(ev RuntimeError) {
+	if rt.onError != nil && ev.Err != nil {
+		rt.onError(ev)
+	}
 }
 
 // ensureGroup creates the consumer group (and the stream) if absent, tolerating

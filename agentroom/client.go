@@ -2,6 +2,7 @@ package agentroom
 
 import (
 	"crypto/tls"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -29,15 +30,19 @@ func NewClient(addr string) *redis.Client {
 		PoolSize:     10,
 		MinIdleConns: 1,
 		MaxRetries:   3,
-		Password:     YOUR_PASSWORD"REDIS_PASSWORD"),
+		Password:     os.Getenv("REDIS_PASSWORD"),
 	}
 	switch strings.ToLower(os.Getenv("REDIS_TLS")) {
 	case "1", "true", "yes":
-		host := addr
-		if i := strings.LastIndex(addr, ":"); i >= 0 {
-			host = addr[:i]
-		}
-		opts.TLSConfig = &tls.Config{ServerName: host}
+		opts.TLSConfig = &tls.Config{ServerName: redisTLSServerName(addr)}
 	}
 	return redis.NewClient(opts)
+}
+
+func redisTLSServerName(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }

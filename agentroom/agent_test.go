@@ -149,3 +149,57 @@ func TestRuntimeListenPublishesExecuteError(t *testing.T) {
 		t.Error("Listen did not return after cancel")
 	}
 }
+
+func TestRuntimeObserverReceivesExecuteError(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, _ := newTestRoom(t)
+	room.cfg.Group = "observer-group"
+	stream := room.cfg.StreamKey()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := room.rdb.XGroupCreateMkStream(ctx, stream, room.cfg.Group, "$").Err(); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := room.Publish(ctx, &Event{Type: "TASK", AgentID: "p"}); err != nil {
+		t.Fatalf("publish task: %v", err)
+	}
+
+	observed := make(chan RuntimeError, 4)
+	w := &captureWorker{id: "w1", interests: []string{"TASK"}, got: make(chan Event, 4), failOn: "TASK"}
+	rt := NewRuntimeWithOptions(room, w, RuntimeOptions{
+		OnError: func(ev RuntimeError) {
+			observed <- ev
+		},
+	})
+	errc := make(chan error, 1)
+	go func() { errc <- rt.Listen(ctx) }()
+
+	select {
+	case ev := <-observed:
+		if ev.Op != "execute" {
+			t.Fatalf("observer op = %q, want execute", ev.Op)
+		}
+		if ev.Stream != stream || ev.Group != room.cfg.Group {
+			t.Fatalf("observer stream/group = %q/%q, want %q/%q", ev.Stream, ev.Group, stream, room.cfg.Group)
+		}
+		if ev.Message == "" {
+			t.Fatal("observer message id is empty")
+		}
+		if ev.Err == nil || ev.Err.Error() == "" {
+			t.Fatal("observer error is empty")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for runtime observer")
+	}
+
+	cancel()
+	select {
+	case <-errc:
+	case <-time.After(3 * time.Second):
+		t.Error("Listen did not return after cancel")
+	}
+}
