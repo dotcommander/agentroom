@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +22,102 @@ type hookOutput struct {
 		HookEventName     string `json:"hookEventName"`
 		AdditionalContext string `json:"additionalContext"`
 	} `json:"hookSpecificOutput"`
+}
+
+type failingHookWriter struct{}
+
+func (failingHookWriter) Write([]byte) (int, error) {
+	return 0, errors.New("hook output failed")
+}
+
+type hookCommitFixture struct {
+	ctx       context.Context
+	addr      string
+	input     string
+	sessionID string
+	local     *agentroom.Room
+	lobby     *agentroom.Room
+	localID   string
+	lobbyID   string
+}
+
+func newHookCommitFixture(t *testing.T) hookCommitFixture {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	orig := newRedisClient
+	newRedisClient = func(string) *redis.Client {
+		return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
+	t.Cleanup(func() { newRedisClient = orig })
+
+	ctx := context.Background()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repo, branch := resolveRoom(ctx, wd)
+	const sessionID = "commit123456"
+	selfID := shortSession(sessionID)
+	t.Setenv("AGENTROOM_AGENT", "gary")
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	local := agentroom.NewRoom(rdb, roomCfg(mr.Addr(), repo, branch))
+	lobby := lobbyRoom(rdb, mr.Addr())
+	if err := local.WriteCursor(ctx, sessionID, "0-0", local.Config().CursorTTL); err != nil {
+		t.Fatalf("write local cursor: %v", err)
+	}
+	if err := lobby.WriteCursor(ctx, sessionID, "0-0", lobby.Config().CursorTTL); err != nil {
+		t.Fatalf("write lobby cursor: %v", err)
+	}
+	directed := &agentroom.Event{Type: "REVIEW_REQUEST", AgentID: "alice", To: "gary-" + selfID, Payload: []byte(`{"pr":42}`)}
+	if err := local.Publish(ctx, directed); err != nil {
+		t.Fatalf("publish directed: %v", err)
+	}
+	if err := local.EnqueueInbox(ctx, "gary", *directed); err != nil {
+		t.Fatalf("enqueue inbox: %v", err)
+	}
+	localEvent := &agentroom.Event{Type: "WORK_COMPLETED", AgentID: "builder"}
+	if err := local.Publish(ctx, localEvent); err != nil {
+		t.Fatalf("publish local: %v", err)
+	}
+	lobbyEvent := &agentroom.Event{Type: "ANNOUNCEMENT", AgentID: "peer"}
+	if err := lobby.Publish(ctx, lobbyEvent); err != nil {
+		t.Fatalf("publish lobby: %v", err)
+	}
+
+	return hookCommitFixture{
+		ctx:       ctx,
+		addr:      mr.Addr(),
+		input:     `{"session_id":"` + sessionID + `","cwd":"` + wd + `"}`,
+		sessionID: sessionID,
+		local:     local,
+		lobby:     lobby,
+		localID:   localEvent.ID,
+		lobbyID:   lobbyEvent.ID,
+	}
+}
+
+func (f hookCommitFixture) requireCursors(t *testing.T, localID, lobbyID string, inboxAdvanced bool) {
+	t.Helper()
+	if cursor, err := f.local.ReadCursor(f.ctx, f.sessionID); err != nil || cursor != localID {
+		t.Fatalf("local cursor = %q, err=%v, want %q", cursor, err, localID)
+	}
+	if cursor, err := f.lobby.ReadCursor(f.ctx, f.sessionID); err != nil || cursor != lobbyID {
+		t.Fatalf("lobby cursor = %q, err=%v, want %q", cursor, err, lobbyID)
+	}
+	cursor, err := f.local.ReadInboxCursor(f.ctx, "gary")
+	if err != nil {
+		t.Fatalf("read inbox cursor: %v", err)
+	}
+	if inboxAdvanced != (cursor != "") {
+		t.Fatalf("inbox cursor = %q, want advanced=%t", cursor, inboxAdvanced)
+	}
 }
 
 func TestExtractText(t *testing.T) {
@@ -244,7 +342,7 @@ func TestSessionStartEmitsDigestJSON(t *testing.T) {
 	ctx := context.Background()
 	wd, _ := os.Getwd()
 	const sessionID = "digest123456"
-	out, err := runCLIWithStdinOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "session-start")
+	out, err := runCLIWithHookOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "session-start")
 	if err != nil {
 		t.Fatalf("session-start: %v", err)
 	}
@@ -471,7 +569,7 @@ func TestUserPromptSubmitEmitsComposedAdditionalContext(t *testing.T) {
 		t.Fatalf("publish lobby: %v", err)
 	}
 
-	out, err := runCLIWithStdinOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "user-prompt-submit")
+	out, err := runCLIWithHookOutput(ctx, mr.Addr(), `{"session_id":"`+sessionID+`","cwd":"`+wd+`"}`, "hook", "user-prompt-submit")
 	if err != nil {
 		t.Fatalf("user-prompt-submit: %v", err)
 	}
@@ -498,6 +596,28 @@ func TestUserPromptSubmitEmitsComposedAdditionalContext(t *testing.T) {
 	if strings.Count(ctxText, "REVIEW_REQUEST") != 1 {
 		t.Fatalf("directed inbox event duplicated in local delta:\n%s", ctxText)
 	}
+}
+
+func TestUserPromptSubmitCommitsCursorsOnlyAfterOutputSucceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test: requires miniredis, stdin override")
+	}
+	f := newHookCommitFixture(t)
+	if err := runCLIWithStdinWriter(f.ctx, f.addr, f.input, failingHookWriter{}, "hook", "user-prompt-submit"); err != nil {
+		t.Fatalf("failed output must stay best-effort: %v", err)
+	}
+	f.requireCursors(t, "0-0", "0-0", false)
+
+	out, err := runCLIWithHookOutput(f.ctx, f.addr, f.input, "hook", "user-prompt-submit")
+	if err != nil {
+		t.Fatalf("successful retry: %v", err)
+	}
+	for _, want := range []string{"REVIEW_REQUEST", "WORK_COMPLETED", "ANNOUNCEMENT"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("successful retry did not re-emit %s:\n%s", want, out)
+		}
+	}
+	f.requireCursors(t, f.localID, f.lobbyID, true)
 }
 
 func TestDeltasSeedCursorWhenMissingWithoutInjectingBacklog(t *testing.T) {
@@ -781,4 +901,36 @@ func runCLIWithStdinOutput(ctx context.Context, addr, input string, args ...stri
 		return string(data), readErr
 	}
 	return string(data), nil
+}
+
+func runCLIWithHookOutput(ctx context.Context, addr, input string, args ...string) (string, error) {
+	var out bytes.Buffer
+	err := runCLIWithStdinWriter(ctx, addr, input, &out, args...)
+	return out.String(), err
+}
+
+func runCLIWithStdinWriter(ctx context.Context, addr, input string, output io.Writer, args ...string) error {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	origStdin := os.Stdin
+	os.Stdin = r
+	defer func() {
+		os.Stdin = origStdin
+		_ = r.Close()
+	}()
+	if _, err := w.Write([]byte(input)); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	root := rootCmd()
+	root.SetOut(output)
+	root.SetErr(io.Discard)
+	root.SetArgs(append([]string{"--addr", addr}, args...))
+	return root.ExecuteContext(ctx)
 }

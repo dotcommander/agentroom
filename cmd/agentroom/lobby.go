@@ -25,15 +25,36 @@ func lobbyRoom(rdb *redis.Client, addr string) *agentroom.Room {
 	return agentroom.NewRoom(rdb, cfg)
 }
 
-// seedRoomCursor sets sessionID's read cursor on room to the join cursor
-// (replay-recent, or the stream tail when replay is disabled) so the first delta
-// never dumps the full backlog. Best-effort: never fails the session.
-func seedRoomCursor(ctx context.Context, room *agentroom.Room, sessionID string) {
-	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
-	defer cancel()
-	if cursor := joinCursor(ctx, room); cursor != "" {
-		_ = room.WriteCursor(ctx, sessionID, cursor, room.Config().CursorTTL)
+// preparedSection pairs rendered hook context with the cursor writes that
+// acknowledge its source events. Hook entry points defer commit until their
+// output is written successfully; direct helper callers use the wrappers below,
+// which preserve the previous immediate-advance behavior.
+type preparedSection struct {
+	text   string
+	commit func(context.Context)
+}
+
+func (p preparedSection) commitCursor(ctx context.Context) {
+	if p.commit != nil {
+		p.commit(ctx)
 	}
+}
+
+func commitPrepared(ctx context.Context, sections ...preparedSection) {
+	for _, section := range sections {
+		section.commitCursor(ctx)
+	}
+}
+
+// prepareSeedRoomCursor prepares sessionID's replay-window or stream-tail
+// baseline without writing it until the hook output is delivered.
+func prepareSeedRoomCursor(ctx context.Context, room *agentroom.Room, sessionID string) preparedSection {
+	if cursor := joinCursor(ctx, room); cursor != "" {
+		return preparedSection{commit: func(commitCtx context.Context) {
+			_ = room.WriteCursor(commitCtx, sessionID, cursor, room.Config().CursorTTL)
+		}}
+	}
+	return preparedSection{}
 }
 
 // localDelta renders the delta of local-room events since this session's cursor
@@ -49,24 +70,35 @@ type localDeltaOptions struct {
 }
 
 func localDelta(ctx context.Context, room *agentroom.Room, opts localDeltaOptions) string {
+	prepared := prepareLocalDelta(ctx, room, opts)
+	prepared.commitCursor(ctx)
+	return prepared.text
+}
+
+func prepareLocalDelta(ctx context.Context, room *agentroom.Room, opts localDeltaOptions) preparedSection {
 	cursor, err := room.ReadCursor(ctx, opts.SessionID)
 	if err != nil {
-		return ""
+		return preparedSection{}
 	}
 	if cursor == "" {
 		// No cursor yet (session-start seed missed, e.g. redis was down then):
 		// seed the join cursor so a recovered session still catches just-landed
 		// events; nothing to inject this prompt.
 		if c := joinCursor(ctx, room); c != "" {
-			_ = room.WriteCursor(ctx, opts.SessionID, c, room.Config().CursorTTL)
+			return preparedSection{commit: func(commitCtx context.Context) {
+				_ = room.WriteCursor(commitCtx, opts.SessionID, c, room.Config().CursorTTL)
+			}}
 		}
-		return ""
+		return preparedSection{}
 	}
 	events, err := room.Since(ctx, cursor, maxDeltaEvents)
 	if err != nil || len(events) == 0 {
-		return ""
+		return preparedSection{}
 	}
-	_ = room.WriteCursor(ctx, opts.SessionID, events[len(events)-1].ID, room.Config().CursorTTL)
+	lastID := events[len(events)-1].ID
+	prepared := preparedSection{commit: func(commitCtx context.Context) {
+		_ = room.WriteCursor(commitCtx, opts.SessionID, lastID, room.Config().CursorTTL)
+	}}
 	rendered := make([]agentroom.Event, 0, len(events))
 	for _, ev := range events {
 		if opts.SkipSourceIDs[ev.ID] || (ev.To != "" && opts.SkipTo[ev.To]) {
@@ -75,9 +107,10 @@ func localDelta(ctx context.Context, room *agentroom.Room, opts localDeltaOption
 		rendered = append(rendered, ev)
 	}
 	if len(rendered) == 0 {
-		return ""
+		return prepared
 	}
-	return deltaDigest(opts.Repo, opts.Branch, rendered)
+	prepared.text = deltaDigest(opts.Repo, opts.Branch, rendered)
+	return prepared
 }
 
 func inboxRecipientsForSession(ctx context.Context, room *agentroom.Room, selfID string) []string {
@@ -115,19 +148,29 @@ func inboxRecipientsForSession(ctx context.Context, room *agentroom.Room, selfID
 }
 
 func inboxDelta(ctx context.Context, room *agentroom.Room, recipients []string) (string, map[string]bool) {
+	prepared, renderedSourceIDs := prepareInboxDelta(ctx, room, recipients)
+	prepared.commitCursor(ctx)
+	return prepared.text, renderedSourceIDs
+}
+
+func prepareInboxDelta(ctx context.Context, room *agentroom.Room, recipients []string) (preparedSection, map[string]bool) {
 	renderedSourceIDs := map[string]bool{}
 	if len(recipients) == 0 {
-		return "", renderedSourceIDs
+		return preparedSection{}, renderedSourceIDs
 	}
 	all, lastByRecipient := collectInboxEvents(ctx, room, recipients)
 	if len(all) == 0 {
-		return "", renderedSourceIDs
+		return preparedSection{}, renderedSourceIDs
 	}
 	section, renderedSourceIDs := renderInboxEvents(all)
-	for recipient, id := range lastByRecipient {
-		_ = room.WriteInboxCursor(ctx, recipient, id, room.Config().InboxCursorTTL)
-	}
-	return section, renderedSourceIDs
+	return preparedSection{
+		text: section,
+		commit: func(commitCtx context.Context) {
+			for recipient, id := range lastByRecipient {
+				_ = room.WriteInboxCursor(commitCtx, recipient, id, room.Config().InboxCursorTTL)
+			}
+		},
+	}, renderedSourceIDs
 }
 
 func collectInboxEvents(ctx context.Context, room *agentroom.Room, recipients []string) ([]agentroom.InboxEvent, map[string]string) {
@@ -198,29 +241,38 @@ func recipientSet(recipients []string) map[string]bool {
 // is bounded by the caller's hookOpTimeout ctx so a slow lobby can't stall the
 // prompt.
 func lobbyDelta(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID, selfID string) string {
+	prepared := prepareLobbyDelta(ctx, rdb, ref, sessionID, selfID)
+	prepared.commitCursor(ctx)
+	return prepared.text
+}
+
+func prepareLobbyDelta(ctx context.Context, rdb *redis.Client, ref roomRef, sessionID, selfID string) preparedSection {
 	lobby := lobbyRoom(rdb, ref.Addr)
 	cursor, err := lobby.ReadCursor(ctx, sessionID)
 	if err != nil {
-		return ""
+		return preparedSection{}
 	}
 	if cursor == "" {
-		seedRoomCursor(ctx, lobby, sessionID) // replay-window seed, never a backlog dump
-		return ""
+		return prepareSeedRoomCursor(ctx, lobby, sessionID) // replay-window seed, never a backlog dump
 	}
 	events, err := lobby.Since(ctx, cursor, maxDeltaEvents)
 	if err != nil || len(events) == 0 {
-		return ""
+		return preparedSection{}
 	}
 	// Advance past everything scanned — including filtered-out noise — so the
 	// same lobby spam is never re-scanned on the next prompt.
-	_ = lobby.WriteCursor(ctx, sessionID, events[len(events)-1].ID, lobby.Config().CursorTTL)
+	lastID := events[len(events)-1].ID
+	prepared := preparedSection{commit: func(commitCtx context.Context) {
+		_ = lobby.WriteCursor(commitCtx, sessionID, lastID, lobby.Config().CursorTTL)
+	}}
 
 	ownRoom := fmt.Sprintf("%s:%s", ref.Repo, ref.Branch)
 	sig := agentroom.FilterLobby(events, selfID, ownRoom, maxLobbyEvents)
 	if len(sig) == 0 {
-		return ""
+		return prepared
 	}
-	return lobbyDigest(sig)
+	prepared.text = lobbyDigest(sig)
+	return prepared
 }
 
 // lobbyDigest renders cross-repo lobby events as a clearly-labeled, separate

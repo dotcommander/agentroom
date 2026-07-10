@@ -70,23 +70,18 @@ func sessionStart(c *cobra.Command) error {
 	defer func() { _ = rdb.Close() }()
 	joinLobby(c.Context(), rdb, ref, in.SessionID)
 	writeLocalHeartbeat(c.Context(), rdb, ref, selfID)
-	seedRoomCursor(c.Context(), agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), in.SessionID)
-	seedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
-	digest := buildDigest(c.Context(), rdb, ref, selfID)
-	if digest == "" {
+	localSeed := prepareSeedRoomCursor(c.Context(), agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), in.SessionID)
+	lobbySeed := prepareSeedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
+	digest := prepareBuildDigest(c.Context(), rdb, ref, selfID)
+	prepared := []preparedSection{localSeed, lobbySeed, digest}
+	if digest.text == "" {
+		commitHookSections(c.Context(), prepared...)
 		return nil
 	}
-	out := map[string]any{
-		"hookSpecificOutput": map[string]any{
-			"hookEventName":     "SessionStart",
-			"additionalContext": digest,
-		},
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
+	if !writeHookOutput(c, "SessionStart", digest.text) {
 		return nil
 	}
-	outln(string(data))
+	commitHookSections(c.Context(), prepared...)
 	return nil
 }
 
@@ -106,6 +101,12 @@ func readSessionInput() sessionStartInput {
 // so the session is never blocked. The noisy lobby and raw recent-activity
 // feeds are intentionally omitted — use `agentroom tail` for the full feed.
 func buildDigest(ctx context.Context, rdb *redis.Client, ref roomRef, selfID string) string {
+	prepared := prepareBuildDigest(ctx, rdb, ref, selfID)
+	commitHookSections(ctx, prepared)
+	return prepared.text
+}
+
+func prepareBuildDigest(ctx context.Context, rdb *redis.Client, ref roomRef, selfID string) preparedSection {
 	local := agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch))
 
 	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
@@ -115,21 +116,25 @@ func buildDigest(ctx context.Context, rdb *redis.Client, ref roomRef, selfID str
 	// event stream. Crashed agents drop within PresenceTTL with no SESSION_ENDED.
 	pres, err := local.Presence(ctx)
 	if err != nil {
-		return ""
+		return preparedSection{}
 	}
 	open, _ := local.OpenTasks(ctx, 50)
 
 	lines := []string{fmt.Sprintf("agentroom -- shared agent mesh (this room: %s:%s)", ref.Repo, ref.Branch)}
 	recipients := inboxRecipientsForSession(ctx, local, selfID)
-	if s, _ := inboxDelta(ctx, local, recipients); s != "" {
-		lines = append(lines, "", s)
+	inbox, _ := prepareInboxDelta(ctx, local, recipients)
+	if inbox.text != "" {
+		lines = append(lines, "", inbox.text)
 	}
 	lines = append(lines, "", "== claimable tasks ==")
 	lines = append(lines, openLines(open)...)
 	lines = append(lines, "", "== who's here (live TTL presence; absence is not proof nobody's working) ==")
 	lines = append(lines, presenceLines(pres, selfID, claimsCounter(ctx, local))...)
 	lines = append(lines, "", "Use `agentroom claim <id>` before editing claimed work; `agentroom done <id>` when finished; `agentroom tail` for the full feed.")
-	return strings.Join(lines, "\n")
+	return preparedSection{
+		text:   strings.Join(lines, "\n"),
+		commit: inbox.commit,
+	}
 }
 
 // joinLobby posts a best-effort AGENT_JOINED to the global lobby room so every
@@ -363,39 +368,56 @@ func userPromptSubmit(c *cobra.Command) error {
 	// independent: a quiet local room no longer suppresses cross-repo signal, and
 	// the local section is unchanged (deltaDigest) when present.
 	recipients := inboxRecipientsForSession(ctx, room, selfID)
-	inboxSection, renderedSourceIDs := inboxDelta(ctx, room, recipients)
-	sections := make([]string, 0, 3)
-	if inboxSection != "" {
-		sections = append(sections, inboxSection)
-	}
-	if s := localDelta(ctx, room, localDeltaOptions{
+	inbox, renderedSourceIDs := prepareInboxDelta(ctx, room, recipients)
+	local := prepareLocalDelta(ctx, room, localDeltaOptions{
 		SessionID:     in.SessionID,
 		Repo:          repo,
 		Branch:        branch,
 		SkipTo:        recipientSet(recipients),
 		SkipSourceIDs: renderedSourceIDs,
-	}); s != "" {
-		sections = append(sections, s)
+	})
+	lobby := prepareLobbyDelta(ctx, rdb, ref, in.SessionID, selfID)
+	prepared := []preparedSection{inbox, local, lobby}
+	sections := make([]string, 0, 3)
+	if inbox.text != "" {
+		sections = append(sections, inbox.text)
 	}
-	if s := lobbyDelta(ctx, rdb, ref, in.SessionID, selfID); s != "" {
-		sections = append(sections, s)
+	if local.text != "" {
+		sections = append(sections, local.text)
+	}
+	if lobby.text != "" {
+		sections = append(sections, lobby.text)
 	}
 	if len(sections) == 0 {
+		commitHookSections(context.WithoutCancel(c.Context()), prepared...)
 		return nil
 	}
+	if !writeHookOutput(c, "UserPromptSubmit", strings.Join(sections, "\n\n")) {
+		return nil
+	}
+	commitHookSections(context.WithoutCancel(c.Context()), prepared...)
+	return nil
+}
 
+func writeHookOutput(c *cobra.Command, eventName, additionalContext string) bool {
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName":     "UserPromptSubmit",
-			"additionalContext": strings.Join(sections, "\n\n"),
+			"hookEventName":     eventName,
+			"additionalContext": additionalContext,
 		},
 	}
 	data, err := json.Marshal(out)
 	if err != nil {
-		return nil
+		return false
 	}
-	outln(string(data))
-	return nil
+	_, err = fmt.Fprintln(c.OutOrStdout(), string(data))
+	return err == nil
+}
+
+func commitHookSections(ctx context.Context, sections ...preparedSection) {
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
+	defer cancel()
+	commitPrepared(ctx, sections...)
 }
 
 const inferredPresencePrefix = "current prompt: "
