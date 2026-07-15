@@ -5,7 +5,7 @@ workers across isolated repo/branch namespaces. Four small concerns in one Go
 package, plus a CLI and Claude Code hooks:
 
 - **Room** — publishes immutable events to a per-repo/branch stream, reads/writes a TTL'd scratchpad, and reads recent activity (`Recent`).
-- **Runtime** — wraps a `Worker` and consumes the stream through a Redis **consumer group**: at-least-once delivery that survives restarts, with `XAUTOCLAIM` recovery of work abandoned by crashed workers.
+- **Runtime** — wraps a `Worker` and consumes the stream through a Redis **consumer group**: at-least-once stream delivery that survives restarts, with `XAUTOCLAIM` recovery and TTL-bounded completion receipts that prevent re-execution after acknowledgment failure.
 - **Discovery** — an optional, self-describing layer: a task **catalog** agents can discover, plus atomic **claim**/complete so they take work without colliding.
 - **Archiver** — compacts streams past a length threshold, snapshotting to cold storage and deleting only the exact archived entries (events appended mid-sweep survive).
 
@@ -35,12 +35,14 @@ directory name plus `main` as the room namespace. Override those with
 
 ## Install
 
-CLI (build beside its package, symlink onto your PATH):
+CLI:
 
 ```bash
-go build -o cmd/agentroom/agentroom ./cmd/agentroom
-ln -sf "$(pwd)/cmd/agentroom/agentroom" ~/go/bin/agentroom
+go install github.com/dotcommander/agentroom/cmd/agentroom@latest
 ```
+
+For local development, build the checkout with
+`go build -o cmd/agentroom/agentroom ./cmd/agentroom`.
 
 Library:
 
@@ -358,6 +360,14 @@ if err := rt.Listen(ctx); err != nil && ctx.Err() == nil {
 If `Execute` returns an error, the Runtime publishes an `ENGINE_RUNTIME_ERROR`
 event (the failure as JSON) and acks the original, so a poison message is never
 redelivered.
+
+After a successful `Execute`, the Runtime stores a completion receipt keyed by
+stream, consumer group, and event ID before it calls `XACK`. If acknowledgment
+fails, recovery replays that receipt and acknowledges without executing the
+worker again. `Config.WorkerReceiptTTL` defaults to seven days and is capped at
+30 days so receipts cannot grow without bound. Set the TTL longer than the
+maximum time an unacknowledged event may remain pending; after expiry, a later
+redelivery can execute the worker again.
 
 ### Delivery model
 

@@ -6,25 +6,25 @@ in *how sign-in is automated*, not in what the mesh can do.
 
 - **Claude Code** — first-class: a `hook` subcommand auto-signs you in and
   injects a boot digest each session. Zero manual steps after wiring.
-- **OpenAI Codex** — no native session hook, so you drive the same CLI
-  directly (optionally wrapped in a launch script) plus an `AGENTS.md`
-  coordination block Codex reads.
-- **pi mono code agent** — same pattern as Codex: `AGENTS.md` block + a
-  sign-in command; `pi` runs shell freely.
+- **OpenAI Codex** — use the CLI directly, or adapt your runtime's lifecycle
+  hook to the JSON contract documented below.
+- **pi mono code agent** — use the CLI directly, with an optional `AGENTS.md`
+  block and sign-in command.
 
-The canonical agent-facing etiquette guide is
-`~/.claude/kb/agentroom/agentroom.md`; full architecture is in `README.md`.
+The coordination policy is in this guide; full architecture is in `README.md`.
 
 ---
 
 ## 1. Prerequisites (all harnesses)
 
-Build and put the CLI on your `PATH`:
+Install the latest released CLI:
 
 ```bash
-go build -o cmd/agentroom/agentroom ./cmd/agentroom
-ln -sf "$(pwd)/cmd/agentroom/agentroom" ~/go/bin/agentroom   # ~/go/bin on PATH
+go install github.com/dotcommander/agentroom/cmd/agentroom@latest
 ```
+
+For local development, build the checkout with
+`go build -o cmd/agentroom/agentroom ./cmd/agentroom`.
 
 You need a reachable Redis (default `localhost:6379`). Configuration is
 env + flags — there is no runtime config file.
@@ -114,8 +114,8 @@ only run `claim`/`done`/`post` when there's real concurrent work (see §6).
 
 ## 4. OpenAI Codex
 
-Codex has no SessionStart-equivalent that emits Claude Code's stdin JSON, so
-the auto-hook does not fire. Two-part setup:
+The bundled hook command consumes Claude Code's stdin JSON. In a Codex runtime
+without an adapter for that contract, use this two-part CLI setup:
 
 **a) Teach the agent the etiquette** — add the block from §7 to your project
 `AGENTS.md` (Codex reads it automatically).

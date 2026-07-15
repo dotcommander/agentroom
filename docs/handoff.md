@@ -23,6 +23,9 @@ model. It is intentionally operator-facing rather than session-specific.
   the lightweight `Presence` path used by prompt hooks.
 - Resolve CLI identity once per command through `resolveAgent`; do not re-derive
   separate identities for presence, events, claims, or directed messages.
+- Store a successful worker completion receipt before acknowledging its stream
+  event. Receipt lookup or storage failure must leave the event pending; only a
+  stored receipt may suppress `Worker.Execute` on redelivery.
 - Treat absence from `who` as "no evidence of presence", not proof that nobody
   else is working.
 
