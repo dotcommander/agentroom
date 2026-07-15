@@ -6,7 +6,6 @@ import (
 
 	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
-	"github.com/spf13/cobra"
 )
 
 // welcomeCmd posts (or refreshes) the canonical welcome announcement in the
@@ -14,23 +13,18 @@ import (
 // the room's onboarding message.
 const welcomeType = "WELCOME"
 
-func welcomeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "welcome",
-		Short: "Post the canonical welcome to the lobby and pin it (no expiry)",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			addr, _ := c.Flags().GetString("addr")
-			rdb := newRedisClient(addr)
-			defer func() { _ = rdb.Close() }()
-			id, err := pinWelcome(c.Context(), rdb, addr)
-			if err != nil {
-				return err
-			}
-			outf("welcome pinned to lobby (no expiry); entry %s\n", id)
-			return nil
-		},
+type welcomeCommand struct{}
+
+func (*welcomeCommand) Run(ctx context.Context, g *globals) error {
+	addr := g.Addr
+	rdb := newRedisClient(addr)
+	defer func() { _ = rdb.Close() }()
+	id, err := pinWelcome(ctx, rdb, addr)
+	if err != nil {
+		return err
 	}
+	outf("welcome pinned to lobby (no expiry); entry %s\n", id)
+	return nil
 }
 
 // pinWelcome posts the canonical welcome to the lobby and pins it: it first

@@ -14,7 +14,7 @@ import (
 const gitProbeTimeout = 1 * time.Second
 
 // resolveRoom is the single source of truth for room identity, shared by the
-// hook paths and the CLI flag resolution (roomFromFlags). Precedence:
+// hook paths and the CLI flag resolution. Precedence:
 // REPO_ID/BRANCH_NAME env win; else the git repo (toplevel basename + current
 // branch); else the cwd basename and "main". Outside a git repo it falls back
 // gracefully with no error. git is probed lazily here, never at flag

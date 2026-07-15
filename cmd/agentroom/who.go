@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/dotcommander/agentroom/agentroom"
-	"github.com/spf13/cobra"
 )
 
 const ttlExpiring = "expiring"
@@ -15,26 +15,21 @@ const ttlExpiring = "expiring"
 // left, since that digest only renders into the hook JSON channel and shows
 // nothing when run by hand. Unlike the digest it is a pure observer: it does NOT
 // heartbeat, so looking never makes you appear.
-func whoCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "who",
-		Short: "List agents currently present (role, claim load, TTL left)",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			pres, err := room.PresenceDetailed(c.Context())
-			if err != nil {
-				return err
-			}
-			for _, line := range whoLines(pres, resolveAgent(c), claimsCounter(c.Context(), room)) {
-				outln(line)
-			}
-			return nil
-		},
+type whoCommand struct {
+	Agent string `help:"This agent's id (tagged (you) in the roster)."`
+}
+
+func (c *whoCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	pres, err := room.PresenceDetailed(ctx)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().String("agent", defaultAgent(), "this agent's id (tagged \"(you)\" in the roster)")
-	return cmd
+	for _, line := range whoLines(pres, resolveAgent(c.Agent), claimsCounter(ctx, room)) {
+		outln(line)
+	}
+	return nil
 }
 
 // whoLines renders the detailed roster: one line per live agent with its

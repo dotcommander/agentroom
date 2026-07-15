@@ -928,9 +928,5 @@ func runCLIWithStdinWriter(ctx context.Context, addr, input string, output io.Wr
 		return err
 	}
 
-	root := rootCmd()
-	root.SetOut(output)
-	root.SetErr(io.Discard)
-	root.SetArgs(append([]string{"--addr", addr}, args...))
-	return root.ExecuteContext(ctx)
+	return executeWithIO(ctx, append([]string{"--addr", addr}, args...), output, io.Discard)
 }

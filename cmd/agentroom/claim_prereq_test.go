@@ -10,7 +10,7 @@ import (
 )
 
 // TestClaimPrereqGateAcrossCLI exercises the feature end to end through the real
-// cobra CLI: register with --prereq, catalog prints prereq=, claim is refused
+// CLI: register with --prereq, catalog prints prereq=, claim is refused
 // before the prerequisite event is posted, and --force bypasses the gate.
 //
 // Not parallel: it swaps global os.Stdout via runCLIWithStdinOutput.

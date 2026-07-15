@@ -12,7 +12,6 @@ import (
 
 	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -34,54 +33,50 @@ type sessionStartInput struct {
 	Prompt    string `json:"prompt"`
 }
 
-func hookCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "hook <event>",
-		Short: "Run as a Claude Code hook (events: session-start, user-prompt-submit, session-end)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			switch args[0] {
-			case "session-start":
-				return sessionStart(c)
-			case "user-prompt-submit":
-				return userPromptSubmit(c)
-			case "session-end":
-				return sessionEnd(c)
-			default:
-				return fmt.Errorf("unknown hook event %q (supported: session-start, user-prompt-submit, session-end)", args[0])
-			}
-		},
+type hookCommand struct {
+	Event string `arg:"" enum:"session-start,user-prompt-submit,session-end"`
+}
+
+func (c *hookCommand) Run(ctx context.Context, g *globals) error {
+	switch c.Event {
+	case "session-start":
+		return sessionStart(ctx, g.Addr, g.Out)
+	case "user-prompt-submit":
+		return userPromptSubmit(ctx, g.Addr, g.Out)
+	case "session-end":
+		return sessionEnd(ctx, g.Addr)
+	default:
+		return fmt.Errorf("unknown hook event %q (supported: session-start, user-prompt-submit, session-end)", c.Event)
 	}
 }
 
 // sessionStart reads the SessionStart payload, builds a digest of lobby + local
 // room activity, and emits it as additionalContext. It NEVER fails the session:
 // any error (redis down, bad input) yields no output and exit 0.
-func sessionStart(c *cobra.Command) error {
-	addr, _ := c.Flags().GetString("addr")
+func sessionStart(ctx context.Context, addr string, out io.Writer) error {
 	in := readSessionInput()
 	if in.SessionID == "" {
 		return nil
 	}
-	repo, branch := resolveRoom(c.Context(), in.CWD)
+	repo, branch := resolveRoom(ctx, in.CWD)
 	ref := roomRef{Addr: addr, Repo: repo, Branch: branch}
 	selfID := shortSession(in.SessionID)
 	rdb := newRedisClient(addr)
 	defer func() { _ = rdb.Close() }()
-	joinLobby(c.Context(), rdb, ref, in.SessionID)
-	writeLocalHeartbeat(c.Context(), rdb, ref, selfID)
-	localSeed := prepareSeedRoomCursor(c.Context(), agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), in.SessionID)
-	lobbySeed := prepareSeedRoomCursor(c.Context(), lobbyRoom(rdb, addr), in.SessionID)
-	digest := prepareBuildDigest(c.Context(), rdb, ref, selfID)
+	joinLobby(ctx, rdb, ref, in.SessionID)
+	writeLocalHeartbeat(ctx, rdb, ref, selfID)
+	localSeed := prepareSeedRoomCursor(ctx, agentroom.NewRoom(rdb, roomCfg(ref.Addr, ref.Repo, ref.Branch)), in.SessionID)
+	lobbySeed := prepareSeedRoomCursor(ctx, lobbyRoom(rdb, addr), in.SessionID)
+	digest := prepareBuildDigest(ctx, rdb, ref, selfID)
 	prepared := []preparedSection{localSeed, lobbySeed, digest}
 	if digest.text == "" {
-		commitHookSections(c.Context(), prepared...)
+		commitHookSections(ctx, prepared...)
 		return nil
 	}
-	if !writeHookOutput(c, "SessionStart", digest.text) {
+	if !writeHookOutput(out, "SessionStart", digest.text) {
 		return nil
 	}
-	commitHookSections(c.Context(), prepared...)
+	commitHookSections(ctx, prepared...)
 	return nil
 }
 
@@ -198,8 +193,7 @@ type sessionEndInput struct {
 // sessionEnd posts a SESSION_ENDED event to the local room with a best-effort
 // summary (the session's opening ask + transcript size), so the next agent
 // inherits what just happened. Best-effort: never fails session teardown.
-func sessionEnd(c *cobra.Command) error {
-	addr, _ := c.Flags().GetString("addr")
+func sessionEnd(ctx context.Context, addr string) error {
 	var in sessionEndInput
 	if raw, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20)); err == nil {
 		_ = json.Unmarshal(raw, &in)
@@ -210,7 +204,7 @@ func sessionEnd(c *cobra.Command) error {
 	if in.SessionID == "" {
 		return nil
 	}
-	repo, branch := resolveRoom(c.Context(), in.CWD)
+	repo, branch := resolveRoom(ctx, in.CWD)
 	ask, entries := transcriptSummary(in.TranscriptPath)
 
 	rdb := newRedisClient(addr)
@@ -225,7 +219,7 @@ func sessionEnd(c *cobra.Command) error {
 	if err != nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hookOpTimeout)
 	defer cancel()
 	_ = room.Publish(ctx, &agentroom.Event{
 		Type:    eventSessionEnded,
@@ -343,17 +337,16 @@ func joinCursor(ctx context.Context, room *agentroom.Room) string {
 // then advances the session's cursor. Nothing new -> no output (zero context
 // cost). NEVER fails the session: any error (redis down, timeout, bad input)
 // yields no output and exit 0.
-func userPromptSubmit(c *cobra.Command) error {
-	addr, _ := c.Flags().GetString("addr")
+func userPromptSubmit(baseCtx context.Context, addr string, out io.Writer) error {
 	in := readSessionInput()
-	repo, branch := resolveRoom(c.Context(), in.CWD)
+	repo, branch := resolveRoom(baseCtx, in.CWD)
 	if in.SessionID == "" {
 		return nil
 	}
 	ref := roomRef{Addr: addr, Repo: repo, Branch: branch}
 	selfID := shortSession(in.SessionID)
 
-	ctx, cancel := context.WithTimeout(c.Context(), hookOpTimeout)
+	ctx, cancel := context.WithTimeout(baseCtx, hookOpTimeout)
 	defer cancel()
 
 	rdb := newRedisClient(addr)
@@ -389,17 +382,17 @@ func userPromptSubmit(c *cobra.Command) error {
 		sections = append(sections, lobby.text)
 	}
 	if len(sections) == 0 {
-		commitHookSections(context.WithoutCancel(c.Context()), prepared...)
+		commitHookSections(context.WithoutCancel(baseCtx), prepared...)
 		return nil
 	}
-	if !writeHookOutput(c, "UserPromptSubmit", strings.Join(sections, "\n\n")) {
+	if !writeHookOutput(out, "UserPromptSubmit", strings.Join(sections, "\n\n")) {
 		return nil
 	}
-	commitHookSections(context.WithoutCancel(c.Context()), prepared...)
+	commitHookSections(context.WithoutCancel(baseCtx), prepared...)
 	return nil
 }
 
-func writeHookOutput(c *cobra.Command, eventName, additionalContext string) bool {
+func writeHookOutput(w io.Writer, eventName, additionalContext string) bool {
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":     eventName,
@@ -410,7 +403,7 @@ func writeHookOutput(c *cobra.Command, eventName, additionalContext string) bool
 	if err != nil {
 		return false
 	}
-	_, err = fmt.Fprintln(c.OutOrStdout(), string(data))
+	_, err = fmt.Fprintln(w, string(data))
 	return err == nil
 }
 

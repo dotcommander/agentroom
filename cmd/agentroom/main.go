@@ -8,23 +8,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/dotcommander/agentroom/agentroom"
 	"github.com/redis/go-redis/v9"
-	"github.com/spf13/cobra"
 )
 
 const (
-	lobbyRepo     = "lobby"
-	defaultBranch = "main"
-	defaultHandle = "cli"
+	lobbyRepo           = "lobby"
+	defaultBranch       = "main"
+	defaultHandle       = "cli"
+	defaultRepoFallback = "demo"
+	helpCommandName     = "help"
+	addrFlag            = "--addr"
+	repoFlag            = "--repo"
+	branchFlag          = "--branch"
 )
 
 func main() {
@@ -39,7 +46,7 @@ func main() {
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return rootCmd().ExecuteContext(ctx)
+	return execute(ctx, os.Args[1:])
 }
 
 func outln(args ...any)               { _, _ = fmt.Fprintln(os.Stdout, args...) }
@@ -68,33 +75,167 @@ func defaultRepo() string {
 	if wd, err := os.Getwd(); err == nil {
 		return filepath.Base(wd)
 	}
-	return "demo"
+	return defaultRepoFallback
 }
 
-func rootCmd() *cobra.Command {
-	root := &cobra.Command{
-		Use:          "agentroom",
-		Short:        "Join an agentroom event mesh: tail, post, and claim work",
-		SilenceUsage: true,
+type globals struct {
+	Addr      string    `help:"Redis address"`
+	Repo      string    `help:"Repo id (room namespace)."`
+	Branch    string    `help:"Branch name (room namespace)."`
+	Out       io.Writer `kong:"-"`
+	Err       io.Writer `kong:"-"`
+	RepoSet   bool      `kong:"-"`
+	BranchSet bool      `kong:"-"`
+}
+
+type cli struct {
+	globals
+	Completion completionCommand `cmd:"" help:"Generate the autocompletion script for the specified shell."`
+	Help       helpCommand       `cmd:"" help:"Help about any command."`
+	Tail       tailCommand       `cmd:"" help:"Print the most recent events on the room stream."`
+	Post       postCommand       `cmd:"" help:"Publish an event to the room (payload is free-form; arg or omitted)."`
+	Wait       waitCommand       `cmd:"" help:"Block until the next room event arrives."`
+	Ask        askCommand        `cmd:"" help:"Ask one live agent and block until its correlated reply arrives."`
+	Reply      replyCommand      `cmd:"" help:"Reply to an ask event, automatically targeting the asker."`
+	Catalog    catalogCommand    `cmd:"" help:"List the task types registered in this room."`
+	Register   registerCommand   `cmd:"" help:"Advertise a task type in the room catalog."`
+	Open       openCommand       `cmd:"" help:"List open (unclaimed, undone) tasks an agent could pick up."`
+	Claim      claimCommand      `cmd:"" help:"Atomically claim a task so no other agent duplicates it."`
+	Done       doneCommand       `cmd:"" help:"Mark a claimed task complete (releasing it)."`
+	Leave      leaveCommand      `cmd:"" help:"Clear this agent's presence (announce you're gone now)."`
+	Who        whoCommand        `cmd:"" help:"List agents currently present (role, claim load, TTL left)."`
+	Hook       hookCommand       `cmd:"" help:"Handle an agent lifecycle hook event."`
+	Welcome    welcomeCommand    `cmd:"" help:"Post the canonical welcome to the lobby and pin it (no expiry)."`
+}
+
+func execute(ctx context.Context, args []string) error {
+	return executeWithIO(ctx, args, os.Stdout, os.Stderr)
+}
+
+func executeWithIO(ctx context.Context, args []string, out, errOut io.Writer) error {
+	helpPath, helpCommandRequested := helpCommandPath(args)
+	app := cli{globals: globals{
+		Addr: envOr("REDIS_ADDR", "localhost:6379"), Repo: defaultRepo(), Branch: envOr("BRANCH_NAME", "main"), Out: out, Err: errOut,
+	}}
+	agent := defaultAgent()
+	app.Tail.Agent, app.Post.Agent, app.Wait.Agent = agent, agent, agent
+	app.Ask.Agent, app.Reply.Agent, app.Claim.Agent = agent, agent, agent
+	app.Done.Agent, app.Leave.Agent, app.Who.Agent = agent, agent, agent
+	parser, err := kong.New(&app, kong.Name("agentroom"), kong.Description("Join an agentroom event mesh: tail, post, and claim work"), kong.Writers(out, errOut), kong.Bind(&app.globals), kong.BindTo(ctx, (*context.Context)(nil)))
+	if err != nil {
+		return err
 	}
-	root.PersistentFlags().String("addr", envOr("REDIS_ADDR", "localhost:6379"), "Redis address")
-	root.PersistentFlags().String("repo", defaultRepo(), "repo id (room namespace)")
-	root.PersistentFlags().String("branch", envOr("BRANCH_NAME", "main"), "branch name (room namespace)")
-	root.AddCommand(tailCmd(), postCmd(), waitCmd(), askCmd(), replyCmd(), catalogCmd(), registerCmd(), openCmd(), claimCmd(), doneCmd(), leaveCmd(), whoCmd(), hookCmd(), welcomeCmd())
-	return root
+	if helpCommandRequested {
+		helpCtx, err := commandHelpContext(parser, helpPath)
+		if err != nil {
+			return err
+		}
+		return helpCtx.PrintUsage(false)
+	}
+	if hasHelpFlag(args) {
+		helpCtx, err := kong.Trace(parser, args)
+		if err != nil {
+			return err
+		}
+		if helpCtx.Selected() == nil && helpCtx.Error != nil {
+			return helpCtx.Error
+		}
+		return helpCtx.PrintUsage(false)
+	}
+	kctx, err := parser.Parse(args)
+	if err != nil {
+		return err
+	}
+	for _, arg := range args {
+		app.RepoSet = app.RepoSet || arg == repoFlag || strings.HasPrefix(arg, repoFlag+"=")
+		app.BranchSet = app.BranchSet || arg == branchFlag || strings.HasPrefix(arg, branchFlag+"=")
+	}
+	return kctx.Run(parser)
 }
 
-// roomFromFlags builds a Room and its client from the persistent flags. The
+type helpCommand struct {
+	Command []string `arg:"" optional:"" name:"command"`
+}
+
+func helpCommandPath(args []string) ([]string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if isGlobalValueFlag(arg) {
+			i++
+			continue
+		}
+		if isGlobalFlagAssignment(arg) {
+			continue
+		}
+		if arg != helpCommandName {
+			return nil, false
+		}
+		return helpTopics(args[i+1:]), true
+	}
+	return nil, false
+}
+
+func helpTopics(args []string) []string {
+	topics := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if isGlobalValueFlag(args[i]) {
+			i++
+			continue
+		}
+		if isGlobalFlagAssignment(args[i]) {
+			continue
+		}
+		topics = append(topics, args[i])
+	}
+	return topics
+}
+
+func isGlobalValueFlag(arg string) bool {
+	return arg == addrFlag || arg == repoFlag || arg == branchFlag
+}
+
+func isGlobalFlagAssignment(arg string) bool {
+	return strings.HasPrefix(arg, addrFlag+"=") || strings.HasPrefix(arg, repoFlag+"=") || strings.HasPrefix(arg, branchFlag+"=")
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func commandHelpContext(parser *kong.Kong, names []string) (*kong.Context, error) {
+	path := []*kong.Path{{App: parser.Model, Flags: parser.Model.Flags}}
+	parent := parser.Model.Node
+	for _, name := range names {
+		var selected *kong.Node
+		for _, child := range parent.Children {
+			if child.Name == name || slices.Contains(child.Aliases, name) {
+				selected = child
+				break
+			}
+		}
+		if selected == nil {
+			return nil, fmt.Errorf("unknown help topic %q", strings.Join(names, " "))
+		}
+		path = append(path, &kong.Path{Parent: parent, Command: selected, Flags: selected.Flags})
+		parent = selected
+	}
+	return &kong.Context{Kong: parser, Path: path}, nil
+}
+
+// room builds a Room and its client from the global flags. The
 // caller must close the returned client.
-func roomFromFlags(cmd *cobra.Command) (*agentroom.Room, *redis.Client) {
-	addr, _ := cmd.Flags().GetString("addr")
-	repo, _ := cmd.Flags().GetString("repo")
-	branch, _ := cmd.Flags().GetString("branch")
+func (g *globals) room(ctx context.Context) (*agentroom.Room, *redis.Client) {
+	addr, repo, branch := g.Addr, g.Repo, g.Branch
 	// Resolve git-aware room identity lazily — never at flag registration, so
 	// --help/completion stay offline (only real room commands reach here).
 	// Explicit --repo/--branch always win; the registered default
 	// (defaultRepo/"main") remains the fallback when git/cwd are unavailable.
-	repo, branch = resolveRoomIdentity(cmd, repo, branch)
+	repo, branch = resolveRoomIdentity(ctx, repo, branch, g.RepoSet, g.BranchSet)
 	cfg := agentroom.DefaultConfig()
 	cfg.RedisAddr = addr
 	cfg.RepoID = repo
@@ -103,121 +244,101 @@ func roomFromFlags(cmd *cobra.Command) (*agentroom.Room, *redis.Client) {
 	return agentroom.NewRoom(rdb, cfg), rdb
 }
 
-func resolveRoomIdentity(cmd *cobra.Command, repo, branch string) (string, string) {
-	if cmd.Flags().Changed("repo") && cmd.Flags().Changed("branch") {
+func resolveRoomIdentity(ctx context.Context, repo, branch string, repoSet, branchSet bool) (string, string) {
+	if repoSet && branchSet {
 		return repo, branch
 	}
 	wd, _ := os.Getwd()
 	if wd == "" {
 		return repo, branch
 	}
-	gitRepo, gitBranch := resolveRoom(cmd.Context(), wd)
-	if !cmd.Flags().Changed("repo") {
+	gitRepo, gitBranch := resolveRoom(ctx, wd)
+	if !repoSet {
 		repo = gitRepo
 	}
-	if !cmd.Flags().Changed("branch") {
+	if !branchSet {
 		branch = gitBranch
 	}
 	return repo, branch
 }
 
-func tailCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "tail",
-		Short: "Print the most recent events on the room stream",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			n, _ := c.Flags().GetInt64("count")
-			events, err := room.Recent(c.Context(), n)
-			if err != nil {
-				return err
-			}
-			for _, e := range events {
-				printEvent(e)
-			}
-			agent := resolveAgent(c)
-			writeHeartbeat(c.Context(), room, agent, "")
-			return nil
-		},
-	}
-	cmd.Flags().Int64("count", 20, "number of recent events to show")
-	cmd.Flags().String("agent", defaultAgent(), "agent id to attribute presence to")
-	return cmd
+type tailCommand struct {
+	Count int64  `default:"20" help:"Number of recent events to show."`
+	Agent string `help:"Agent id to attribute presence to."`
 }
 
-func postCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "post <type> [payload]",
-		Short: "Publish an event to the room (payload is free-form; arg or omitted)",
-		Long: "Publish a free-form event to the room.\n\n" +
-			"Rooms are repo/branch-scoped. To reach the shared global lobby every agent\n" +
-			"sees regardless of repo (e.g. cross-repo announcements), target it explicitly\n" +
-			"with --repo lobby: agentroom post ANNOUNCEMENT '{...}' --repo lobby --agent <handle>.",
-		Args: cobra.RangeArgs(1, 2),
-		RunE: func(c *cobra.Command, args []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			agent := resolveAgent(c)
-			rawTo, _ := c.Flags().GetString("to")
-			to, err := resolveTarget(c.Context(), room, rawTo)
-			if err != nil {
-				return err
-			}
-			if rawTo != "" && to == rawTo && !strings.Contains(rawTo, ":") {
-				_, _ = fmt.Fprintf(c.ErrOrStderr(), "warning: no live agent matches --to %q; posting verbatim\n", rawTo)
-			}
-			inboxRecipient := durableInboxRecipient(rawTo)
-			var payload []byte
-			if len(args) == 2 {
-				payload = []byte(args[1])
-			}
-			ev := &agentroom.Event{Type: args[0], AgentID: agent, To: to, Payload: payload}
-			if err := room.Publish(c.Context(), ev); err != nil {
-				return err
-			}
-			if inboxRecipient != "" {
-				if err := room.EnqueueInbox(c.Context(), inboxRecipient, *ev); err != nil {
-					return fmt.Errorf("posted %s as %s (entry %s), but durable inbox enqueue failed: %w", ev.Type, agent, ev.ID, err)
-				}
-			}
-			// Opportunistic heartbeat: every CLI call refreshes the agent's
-			// presence TTL key — this is the heartbeat in a daemonless CLI.
-			writeHeartbeat(c.Context(), room, agent, joinDesc(payload))
-			outf("posted %s as %s (entry %s)\n", ev.Type, agent, ev.ID)
-			return nil
-		},
+func (c *tailCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	events, err := room.Recent(ctx, c.Count)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().String("agent", defaultAgent(), "agent id to attribute the event to")
-	cmd.Flags().String("to", "", `directed recipient: a room key "repo:branch" or an agent handle (empty = broadcast)`)
-	return cmd
+	for _, e := range events {
+		printEvent(e)
+	}
+	agent := resolveAgent(c.Agent)
+	writeHeartbeat(ctx, room, agent, "")
+	return nil
 }
 
-func waitCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "wait",
-		Short: "Block until the next room event arrives",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			agent := resolveAgent(c)
-			toMe, _ := c.Flags().GetBool("to-me")
-			timeout, _ := c.Flags().GetDuration("timeout")
-			writeHeartbeat(c.Context(), room, agent, "")
-			ev, err := waitForEvent(c.Context(), room, agent, toMe, timeout)
-			if err != nil {
-				return err
-			}
-			printEvent(ev)
-			return nil
-		},
+type postCommand struct {
+	Type    string `arg:""`
+	Payload string `arg:"" optional:""`
+	Agent   string `help:"Agent id to attribute the event to."`
+	To      string `help:"Directed recipient: a room key or agent handle (empty = broadcast)."`
+}
+
+func (c *postCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	agent := resolveAgent(c.Agent)
+	rawTo := c.To
+	to, err := resolveTarget(ctx, room, rawTo)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().String("agent", defaultAgent(), "agent id to match when --to-me is set")
-	cmd.Flags().Bool("to-me", false, "only unblock for events directed to this agent")
-	cmd.Flags().Duration("timeout", 0, "maximum time to wait (0 = wait until interrupted)")
-	return cmd
+	if rawTo != "" && to == rawTo && !strings.Contains(rawTo, ":") {
+		_, _ = fmt.Fprintf(g.Err, "warning: no live agent matches --to %q; posting verbatim\n", rawTo)
+	}
+	inboxRecipient := durableInboxRecipient(rawTo)
+	var payload []byte
+	if c.Payload != "" {
+		payload = []byte(c.Payload)
+	}
+	ev := &agentroom.Event{Type: c.Type, AgentID: agent, To: to, Payload: payload}
+	if err := room.Publish(ctx, ev); err != nil {
+		return err
+	}
+	if inboxRecipient != "" {
+		if err := room.EnqueueInbox(ctx, inboxRecipient, *ev); err != nil {
+			return fmt.Errorf("posted %s as %s (entry %s), but durable inbox enqueue failed: %w", ev.Type, agent, ev.ID, err)
+		}
+	}
+	// Opportunistic heartbeat: every CLI call refreshes the agent's
+	// presence TTL key — this is the heartbeat in a daemonless CLI.
+	writeHeartbeat(ctx, room, agent, joinDesc(payload))
+	outf("posted %s as %s (entry %s)\n", ev.Type, agent, ev.ID)
+	return nil
+}
+
+type waitCommand struct {
+	Agent   string        `help:"Agent id to match when --to-me is set."`
+	ToMe    bool          `name:"to-me" help:"Only unblock for events directed to this agent."`
+	Timeout time.Duration `help:"Maximum time to wait (0 = wait until interrupted)."`
+}
+
+func (c *waitCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	agent := resolveAgent(c.Agent)
+	writeHeartbeat(ctx, room, agent, "")
+	ev, err := waitForEvent(ctx, room, agent, c.ToMe, c.Timeout)
+	if err != nil {
+		return err
+	}
+	printEvent(ev)
+	return nil
 }
 
 func waitForEvent(ctx context.Context, room *agentroom.Room, agent string, toMe bool, timeout time.Duration) (agentroom.Event, error) {
@@ -298,167 +419,136 @@ func durableInboxRecipient(rawTo string) string {
 	return sanitizeHandle(rawTo)
 }
 
-func catalogCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "catalog",
-		Short: "List the task types registered in this room",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			defs, err := room.Catalog(c.Context())
-			if err != nil {
-				return err
-			}
-			if len(defs) == 0 {
-				outln("(catalog is empty)")
-				return nil
-			}
-			for _, d := range defs {
-				outf("%-16s %s\n", d.Type, d.Description)
-				outf("%16s produces=%s requires=%s\n", "", d.Produces, d.Requires)
-				if d.Prerequisite != "" {
-					outf("%16s prereq=%s\n", "", d.Prerequisite)
-				}
-			}
-			return nil
-		},
+type catalogCommand struct{}
+
+func (*catalogCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	defs, err := room.Catalog(ctx)
+	if err != nil {
+		return err
 	}
+	if len(defs) == 0 {
+		outln("(catalog is empty)")
+		return nil
+	}
+	for _, d := range defs {
+		outf("%-16s %s\n", d.Type, d.Description)
+		outf("%16s produces=%s requires=%s\n", "", d.Produces, d.Requires)
+		if d.Prerequisite != "" {
+			outf("%16s prereq=%s\n", "", d.Prerequisite)
+		}
+	}
+	return nil
 }
 
-func registerCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "register <type> <description>",
-		Short: "Advertise a task type in the room catalog",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(c *cobra.Command, args []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			produces, _ := c.Flags().GetString("produces")
-			requires, _ := c.Flags().GetString("requires")
-			prereq, _ := c.Flags().GetString("prereq")
-			def := agentroom.TaskDef{Type: args[0], Description: args[1], Produces: produces, Requires: requires, Prerequisite: prereq}
-			if err := room.RegisterTask(c.Context(), def); err != nil {
-				return err
-			}
-			outf("registered task type %s\n", def.Type)
-			return nil
-		},
-	}
-	cmd.Flags().String("produces", "", "event type emitted on success")
-	cmd.Flags().String("requires", "", "capability an agent needs to handle it")
-	cmd.Flags().String("prereq", "", "event type that must exist in the stream before this task may be claimed (disables gating when empty)")
-	return cmd
+type registerCommand struct {
+	Type        string `arg:""`
+	Description string `arg:""`
+	Produces    string `help:"Event type emitted on success."`
+	Requires    string `help:"Capability an agent needs to handle it."`
+	Prereq      string `help:"Event type that must exist before this task may be claimed."`
 }
 
-func openCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "open",
-		Short: "List open (unclaimed, undone) tasks an agent could pick up",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			n, _ := c.Flags().GetInt64("count")
-			tasks, err := room.OpenTasks(c.Context(), n)
-			if err != nil {
-				return err
-			}
-			if len(tasks) == 0 {
-				outln("(no open tasks)")
-				return nil
-			}
-			for _, tk := range tasks {
-				outf("%s  %-16s %s\n", tk.ID, tk.Type, tk.Payload)
-			}
-			return nil
-		},
+func (c *registerCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	def := agentroom.TaskDef{Type: c.Type, Description: c.Description, Produces: c.Produces, Requires: c.Requires, Prerequisite: c.Prereq}
+	if err := room.RegisterTask(ctx, def); err != nil {
+		return err
 	}
-	cmd.Flags().Int64("count", 50, "how many recent stream entries to scan (capped at 100)")
-	return cmd
+	outf("registered task type %s\n", def.Type)
+	return nil
 }
 
-func claimCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "claim <task-id>",
-		Short: "Atomically claim a task so no other agent duplicates it",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			agent := resolveAgent(c)
-			ttl, _ := c.Flags().GetDuration("ttl")
-			force, _ := c.Flags().GetBool("force")
-			var (
-				ok  bool
-				err error
-			)
-			if force {
-				ok, err = room.Claim(c.Context(), args[0], agent, ttl)
-			} else {
-				ok, err = room.ClaimChecked(c.Context(), args[0], agent, ttl)
-			}
-			if err != nil {
-				return err
-			}
-			if !ok {
-				outf("task %s is already claimed or done -- skip it\n", args[0])
-				return nil
-			}
-			writeHeartbeat(c.Context(), room, agent, "")
-			outf("claimed task %s as %s (lease %s)\n", args[0], agent, ttl)
-			return nil
-		},
-	}
-	cmd.Flags().String("agent", defaultAgent(), "agent id claiming the task")
-	cmd.Flags().Duration("ttl", 5*time.Minute, "claim lease before another agent may reclaim")
-	cmd.Flags().Bool("force", false, "bypass the declared prerequisite gate and claim unconditionally")
-	return cmd
+type openCommand struct {
+	Count int64 `default:"50" help:"How many recent stream entries to scan (capped at 100)."`
 }
 
-func doneCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "done <task-id> [result]",
-		Short: "Mark a claimed task complete (releasing it)",
-		Args:  cobra.RangeArgs(1, 2),
-		RunE: func(c *cobra.Command, args []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			agent := resolveAgent(c)
-			var result []byte
-			if len(args) == 2 {
-				result = []byte(args[1])
-			}
-			if err := room.Complete(c.Context(), args[0], result); err != nil {
-				return err
-			}
-			writeHeartbeat(c.Context(), room, agent, "")
-			outf("completed task %s\n", args[0])
-			return nil
-		},
+func (c *openCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	tasks, err := room.OpenTasks(ctx, c.Count)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().String("agent", defaultAgent(), "agent id completing the task")
-	return cmd
+	if len(tasks) == 0 {
+		outln("(no open tasks)")
+		return nil
+	}
+	for _, tk := range tasks {
+		outf("%s  %-16s %s\n", tk.ID, tk.Type, tk.Payload)
+	}
+	return nil
 }
 
-func leaveCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "leave",
-		Short: "Clear this agent's presence (announce you're gone now)",
-		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			room, rdb := roomFromFlags(c)
-			defer func() { _ = rdb.Close() }()
-			agent := resolveAgent(c)
-			if err := room.ClearPresence(c.Context(), agent); err != nil {
-				return err
-			}
-			outf("cleared presence for %s\n", agent)
-			return nil
-		},
+type claimCommand struct {
+	TaskID string        `arg:"" name:"task-id"`
+	Agent  string        `help:"Agent id claiming the task."`
+	TTL    time.Duration `default:"5m" help:"Claim lease before another agent may reclaim."`
+	Force  bool          `help:"Bypass the declared prerequisite gate and claim unconditionally."`
+}
+
+func (c *claimCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	agent := resolveAgent(c.Agent)
+	var (
+		ok  bool
+		err error
+	)
+	if c.Force {
+		ok, err = room.Claim(ctx, c.TaskID, agent, c.TTL)
+	} else {
+		ok, err = room.ClaimChecked(ctx, c.TaskID, agent, c.TTL)
 	}
-	cmd.Flags().String("agent", defaultAgent(), "agent id to clear presence for")
-	return cmd
+	if err != nil {
+		return err
+	}
+	if !ok {
+		outf("task %s is already claimed or done -- skip it\n", c.TaskID)
+		return nil
+	}
+	writeHeartbeat(ctx, room, agent, "")
+	outf("claimed task %s as %s (lease %s)\n", c.TaskID, agent, c.TTL)
+	return nil
+}
+
+type doneCommand struct {
+	TaskID string `arg:"" name:"task-id"`
+	Result string `arg:"" optional:""`
+	Agent  string `help:"Agent id completing the task."`
+}
+
+func (c *doneCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	agent := resolveAgent(c.Agent)
+	var result []byte
+	if c.Result != "" {
+		result = []byte(c.Result)
+	}
+	if err := room.Complete(ctx, c.TaskID, result); err != nil {
+		return err
+	}
+	writeHeartbeat(ctx, room, agent, "")
+	outf("completed task %s\n", c.TaskID)
+	return nil
+}
+
+type leaveCommand struct {
+	Agent string `help:"Agent id to clear presence for."`
+}
+
+func (c *leaveCommand) Run(ctx context.Context, g *globals) error {
+	room, rdb := g.room(ctx)
+	defer func() { _ = rdb.Close() }()
+	agent := resolveAgent(c.Agent)
+	if err := room.ClearPresence(ctx, agent); err != nil {
+		return err
+	}
+	outf("cleared presence for %s\n", agent)
+	return nil
 }
 
 func printEvent(e agentroom.Event) {
@@ -526,7 +616,9 @@ func qualifyAgent(handle string) string {
 // resolveAgent reads the --agent flag and qualifies it: the single source of
 // truth for the identity a command acts as (presence key, event attribution,
 // claim owner).
-func resolveAgent(cmd *cobra.Command) string {
-	raw, _ := cmd.Flags().GetString("agent")
+func resolveAgent(raw string) string {
+	if raw == "" {
+		raw = defaultAgent()
+	}
 	return qualifyAgent(raw)
 }

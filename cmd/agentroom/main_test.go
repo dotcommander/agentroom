@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,15 +16,61 @@ import (
 
 func TestRootCmdHasSubcommands(t *testing.T) {
 	t.Parallel()
-	root := rootCmd()
+	typ := reflect.TypeFor[cli]()
 	got := map[string]bool{}
-	for _, c := range root.Commands() {
-		got[c.Name()] = true
+	for field := range typ.Fields() {
+		got[strings.ToLower(field.Name)] = true
 	}
-	for _, name := range []string{"tail", "post", "wait", "ask", "reply", "catalog", "register", "open", "claim", "done", "leave", "hook", "welcome"} {
+	for _, name := range []string{"completion", "help", "tail", "post", "wait", "ask", "reply", "catalog", "register", "open", "claim", "done", "leave", "who", "hook", "welcome"} {
 		if !got[name] {
-			t.Errorf("missing subcommand %q", name)
+			t.Errorf("help missing subcommand %q", name)
 		}
+	}
+}
+
+func TestHelpCommandCompatibility(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"help", "post"},
+		{"post", "--help"},
+		{"--repo", "demo", "help", "post"},
+		{"help", "post", "--repo", "demo"},
+	} {
+		var out bytes.Buffer
+		if err := executeWithIO(context.Background(), args, &out, &out); err != nil {
+			t.Fatalf("executeWithIO(%q): %v", args, err)
+		}
+		if got := out.String(); !strings.Contains(got, "Usage: agentroom post <type>") || !strings.Contains(got, "--to=STRING") {
+			t.Fatalf("help output for %q:\n%s", args, got)
+		}
+	}
+}
+
+func TestCompletionCommandCompatibility(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		shell  string
+		marker string
+	}{
+		{shell: "bash", marker: "complete -F _agentroom_complete agentroom"},
+		{shell: "fish", marker: "complete -c agentroom"},
+		{shell: "powershell", marker: "Register-ArgumentCompleter"},
+		{shell: "zsh", marker: "compdef _agentroom agentroom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.shell, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			if err := executeWithIO(context.Background(), []string{"completion", tt.shell}, &out, &out); err != nil {
+				t.Fatalf("completion %s: %v", tt.shell, err)
+			}
+			got := out.String()
+			for _, want := range []string{tt.marker, "post", "--repo"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("completion %s missing %q:\n%s", tt.shell, want, got)
+				}
+			}
+		})
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	"go.uber.org/goleak"
 )
 
-// TestPresenceLifecycleAcrossCLI exercises the real cobra RunE paths (post,
+// TestPresenceLifecycleAcrossCLI exercises the real CLI paths (post,
 // claim) and the hook session-start/session-end paths against one shared
 // miniredis backend, then advances past PresenceTTL and asserts the agent drops
 // from the live presence set — the full heartbeat->expiry lifecycle end to end
@@ -84,14 +84,10 @@ func TestPresenceLifecycleAcrossCLI(t *testing.T) {
 	}
 }
 
-// runCLI executes the real root cobra command with args against addr, capturing
+// runCLI executes the real CLI with args against addr, capturing
 // output so the test stays quiet. It is the "real CLI invocation" seam.
 func runCLI(ctx context.Context, addr string, args ...string) error {
-	root := rootCmd()
-	root.SetArgs(append([]string{"--addr", addr}, args...))
-	root.SetOut(&bytes.Buffer{})
-	root.SetErr(&bytes.Buffer{})
-	return root.ExecuteContext(ctx)
+	return executeWithIO(ctx, append([]string{"--addr", addr}, args...), &bytes.Buffer{}, &bytes.Buffer{})
 }
 
 // TestClaimCountRendersAcrossCLI proves the render-time "(N claimed)" capacity
