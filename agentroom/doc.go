@@ -14,10 +14,12 @@
 //     crashed agent drops within Config.PresenceTTL with no explicit exit needed.
 //
 //   - Runtime (agent.go) wraps a Worker and consumes the stream through a Redis
-//     consumer group. Delivery is at-least-once and survives restarts: the group
-//     persists its position, so events published while a worker is down are
-//     delivered on reconnect, and entries left pending by a crashed worker are
-//     reclaimed via XAUTOCLAIM. Each distinct worker TYPE should use its own
+//     consumer group. Stream delivery is at-least-once and survives restarts:
+//     the group persists its position, so events published while a worker is
+//     down are delivered on reconnect, and entries left pending by a crashed
+//     worker are reclaimed via XAUTOCLAIM. A TTL-bounded completion receipt is
+//     stored before acknowledgment, so redelivery after an acknowledgment
+//     failure skips Worker.Execute. Each distinct worker TYPE should use its own
 //     Config.Group; instances of one type share a group (load-balanced) with
 //     unique Worker.ID() consumer names. Worker.Interests further filters which
 //     delivered events the worker acts on.

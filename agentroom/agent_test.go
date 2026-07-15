@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type captureWorker struct {
@@ -13,6 +16,28 @@ type captureWorker struct {
 	interests []string
 	got       chan Event
 	failOn    string
+}
+
+type failFirstAckHook struct {
+	failed        atomic.Bool
+	receiptExists func() bool
+	sawReceipt    atomic.Bool
+}
+
+func (h *failFirstAckHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *failFirstAckHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "xack" && h.failed.CompareAndSwap(false, true) {
+			h.sawReceipt.Store(h.receiptExists())
+			return errors.New("injected xack failure")
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *failFirstAckHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 func (w *captureWorker) ID() string          { return w.id }
@@ -202,4 +227,93 @@ func TestRuntimeObserverReceivesExecuteError(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Error("Listen did not return after cancel")
 	}
+}
+
+func TestRuntimeReceiptReplaysAfterAckFailure(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	room.cfg.Group = "receipt-group"
+	room.cfg.WorkerReceiptTTL = time.Hour
+	ctx := context.Background()
+	stream := room.cfg.StreamKey()
+	msg := pendingMessage(t, room, stream, room.cfg.Group)
+	receiptKey := room.cfg.workerReceiptKey(room.cfg.Group, msg.ID)
+	hook := &failFirstAckHook{receiptExists: func() bool { return mr.Exists(receiptKey) }}
+	room.rdb.AddHook(hook)
+
+	w := &captureWorker{id: "w1", interests: []string{"TASK"}, got: make(chan Event, 2)}
+	rt := NewRuntime(room, w)
+	rt.handle(ctx, stream, room.cfg.Group, msg)
+	if !hook.sawReceipt.Load() {
+		t.Fatal("XACK ran before the completed receipt existed")
+	}
+	if got := mr.TTL(receiptKey); got != time.Hour {
+		t.Fatalf("receipt TTL = %v, want 1h", got)
+	}
+	if len(w.got) != 1 {
+		t.Fatalf("Execute count after first delivery = %d, want 1", len(w.got))
+	}
+
+	// Simulate recovery/redelivery of the still-pending message. The completed
+	// receipt must skip Execute and allow the retrying XACK to clear it.
+	rt.handle(ctx, stream, room.cfg.Group, msg)
+	if len(w.got) != 1 {
+		t.Fatalf("Execute count after receipt replay = %d, want 1", len(w.got))
+	}
+	pending, err := room.rdb.XPending(ctx, stream, room.cfg.Group).Result()
+	if err != nil {
+		t.Fatalf("XPENDING: %v", err)
+	}
+	if pending.Count != 0 {
+		t.Fatalf("pending count after replay acknowledgment = %d, want 0", pending.Count)
+	}
+}
+
+func TestRuntimeReceiptExpires(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires redis (miniredis)")
+	}
+	room, mr := newTestRoom(t)
+	room.cfg.Group = "expiry-group"
+	room.cfg.WorkerReceiptTTL = time.Minute
+	ctx := context.Background()
+	stream := room.cfg.StreamKey()
+	msg := pendingMessage(t, room, stream, room.cfg.Group)
+	w := &captureWorker{id: "w1", interests: []string{"TASK"}, got: make(chan Event, 3)}
+	rt := NewRuntime(room, w)
+
+	rt.handle(ctx, stream, room.cfg.Group, msg)
+	mr.FastForward(time.Minute + time.Second)
+	rt.handle(ctx, stream, room.cfg.Group, msg)
+	if len(w.got) != 2 {
+		t.Fatalf("Execute count after receipt expiry = %d, want 2", len(w.got))
+	}
+}
+
+func pendingMessage(t *testing.T, room *Room, stream, group string) redis.XMessage {
+	t.Helper()
+	ctx := context.Background()
+	if err := room.rdb.XGroupCreateMkStream(ctx, stream, group, "0").Err(); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := room.Publish(ctx, &Event{Type: "TASK", AgentID: "producer"}); err != nil {
+		t.Fatalf("publish task: %v", err)
+	}
+	res, err := room.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    group,
+		Consumer: "w1",
+		Streams:  []string{stream, ">"},
+		Count:    1,
+	}).Result()
+	if err != nil {
+		t.Fatalf("read group: %v", err)
+	}
+	if len(res) != 1 || len(res[0].Messages) != 1 {
+		t.Fatalf("read group returned %#v, want one message", res)
+	}
+	return res[0].Messages[0]
 }

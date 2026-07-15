@@ -99,6 +99,29 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Group != defaultGroup {
 		t.Errorf("Group = %q, want agents", cfg.Group)
 	}
+	if cfg.WorkerReceiptTTL != 7*24*time.Hour {
+		t.Errorf("WorkerReceiptTTL = %v, want 168h", cfg.WorkerReceiptTTL)
+	}
+}
+
+func TestWorkerReceiptTTLIsBounded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ttl  time.Duration
+		want time.Duration
+	}{
+		{name: "zero uses default", want: 7 * 24 * time.Hour},
+		{name: "configured", ttl: 12 * time.Hour, want: 12 * time.Hour},
+		{name: "clamped", ttl: 90 * 24 * time.Hour, want: 30 * 24 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (Config{WorkerReceiptTTL: tt.ttl}).workerReceiptTTL(); got != tt.want {
+				t.Fatalf("workerReceiptTTL() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestEventJSONRoundTrip(t *testing.T) {

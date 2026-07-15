@@ -3,6 +3,7 @@
 package agentroom
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"time"
 )
@@ -38,6 +39,7 @@ type Config struct {
 	ArchiveThreshold int64         // stream length that triggers compaction
 	SweepInterval    time.Duration // how often agentroomd re-runs the archive sweep
 	Group            string        // consumer-group name for Runtime delivery
+	WorkerReceiptTTL time.Duration // completed worker receipts expire after this duration; non-positive uses the default and values above the safety cap are clamped
 	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
 	CursorTTL        time.Duration // per-session read-cursor key auto-expires this long after the last refresh; a lost/expired cursor simply re-baselines to the stream tail
 	JoinReplayWindow time.Duration // a freshly-joined session seeds its read cursor this far back instead of the bare tail, so it replays a peer's just-landed events (the join-trap); non-positive disables replay
@@ -46,6 +48,11 @@ type Config struct {
 // defaultGroup is the fallback consumer-group name used when Config.Group is
 // unset; single source of truth for DefaultConfig and Runtime.group.
 const defaultGroup = "agents"
+
+const (
+	defaultWorkerReceiptTTL = 7 * 24 * time.Hour
+	maxWorkerReceiptTTL     = 30 * 24 * time.Hour
+)
 
 const streamStartID = "0-0"
 
@@ -63,10 +70,21 @@ func DefaultConfig() Config {
 		ArchiveThreshold: 10000,
 		SweepInterval:    24 * time.Hour,
 		Group:            defaultGroup,
+		WorkerReceiptTTL: defaultWorkerReceiptTTL,
 		PresenceTTL:      15 * time.Minute,
 		CursorTTL:        24 * time.Hour,
 		JoinReplayWindow: 10 * time.Minute,
 	}
+}
+
+func (c Config) workerReceiptTTL() time.Duration {
+	if c.WorkerReceiptTTL <= 0 {
+		return defaultWorkerReceiptTTL
+	}
+	if c.WorkerReceiptTTL > maxWorkerReceiptTTL {
+		return maxWorkerReceiptTTL
+	}
+	return c.WorkerReceiptTTL
 }
 
 // roomPrefix is the "repo:<id>:<branch>" namespace every room key is built on —
@@ -79,6 +97,13 @@ func (c Config) roomPrefix() string {
 // StreamKey is the Redis Streams key for this room's event log.
 func (c Config) StreamKey() string {
 	return c.roomPrefix() + ":events"
+}
+
+// workerReceiptKey identifies successful handling of one stream event by one
+// consumer group. Event IDs cannot contain colons, but group names can, so the
+// group is encoded to keep the key tuple unambiguous.
+func (c Config) workerReceiptKey(group, eventID string) string {
+	return c.roomPrefix() + ":worker-receipt:" + base64.RawURLEncoding.EncodeToString([]byte(group)) + ":" + eventID
 }
 
 // ScratchpadPrefix is the key prefix for this room's transient KV scratchpad.

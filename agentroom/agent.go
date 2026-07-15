@@ -130,18 +130,55 @@ func (rt *Runtime) dispatch(ctx context.Context, stream, group string, res []red
 // recorded as its own event, so we never redeliver a poison message.
 func (rt *Runtime) handle(ctx context.Context, stream, group string, msg redis.XMessage) {
 	ev := decodeEvent(msg)
-	if matches(rt.worker.Interests(), ev.Type) {
-		if err := rt.worker.Execute(ctx, ev, rt.room); err != nil {
-			rt.observe(RuntimeError{Op: "execute", Stream: stream, Group: group, Message: msg.ID, Err: err})
-			rt.publishError(ctx, err)
-		}
+	if !matches(rt.worker.Interests(), ev.Type) {
+		rt.ack(ctx, stream, group, msg.ID)
+		return
 	}
+
+	completed, err := rt.hasWorkerReceipt(ctx, group, msg.ID)
+	if err != nil {
+		rt.observe(RuntimeError{Op: "receipt_lookup", Stream: stream, Group: group, Message: msg.ID, Err: err})
+		return
+	}
+	if completed {
+		rt.ack(ctx, stream, group, msg.ID)
+		return
+	}
+	if err := rt.worker.Execute(ctx, ev, rt.room); err != nil {
+		rt.observe(RuntimeError{Op: "execute", Stream: stream, Group: group, Message: msg.ID, Err: err})
+		rt.publishError(ctx, err)
+		rt.ack(ctx, stream, group, msg.ID)
+		return
+	}
+	if err := rt.storeWorkerReceipt(ctx, group, msg.ID); err != nil {
+		rt.observe(RuntimeError{Op: "receipt_store", Stream: stream, Group: group, Message: msg.ID, Err: err})
+		return
+	}
+	rt.ack(ctx, stream, group, msg.ID)
+}
+
+func (rt *Runtime) hasWorkerReceipt(ctx context.Context, group, eventID string) (bool, error) {
+	n, err := rt.room.rdb.Exists(ctx, rt.room.cfg.workerReceiptKey(group, eventID)).Result()
+	if err != nil {
+		return false, fmt.Errorf("agentroom: lookup worker receipt: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (rt *Runtime) storeWorkerReceipt(ctx context.Context, group, eventID string) error {
+	if err := rt.room.rdb.Set(ctx, rt.room.cfg.workerReceiptKey(group, eventID), "completed", rt.room.cfg.workerReceiptTTL()).Err(); err != nil {
+		return fmt.Errorf("agentroom: store worker receipt: %w", err)
+	}
+	return nil
+}
+
+func (rt *Runtime) ack(ctx context.Context, stream, group, eventID string) {
 	// Ack is best-effort: a failed XAck leaves the entry PENDING, which
-	// reclaim()/XAutoClaim recovers, so work is never lost — at worst the
-	// idempotent Execute sees a redelivery. Surfacing the error would ripple
+	// reclaim()/XAutoClaim recovers. A completed worker receipt makes that
+	// redelivery a replay that skips Execute. Surfacing the error would ripple
 	// into the Listen/reclaim loop for no correctness gain.
-	if err := rt.room.rdb.XAck(ctx, stream, group, msg.ID).Err(); err != nil {
-		rt.observe(RuntimeError{Op: "ack", Stream: stream, Group: group, Message: msg.ID, Err: err})
+	if err := rt.room.rdb.XAck(ctx, stream, group, eventID).Err(); err != nil {
+		rt.observe(RuntimeError{Op: "ack", Stream: stream, Group: group, Message: eventID, Err: err})
 	}
 }
 
