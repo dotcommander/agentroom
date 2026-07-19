@@ -13,10 +13,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/dotcommander/agentroom/agentroom"
@@ -36,7 +34,11 @@ const (
 
 func main() {
 	if err := run(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "error:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "error:", terminalText(err.Error()))
+		var exitErr interface{ ExitCode() int }
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
@@ -102,8 +104,14 @@ type cli struct {
 	Open       openCommand       `cmd:"" help:"List open (unclaimed, undone) tasks an agent could pick up."`
 	Claim      claimCommand      `cmd:"" help:"Atomically claim a task so no other agent duplicates it."`
 	Done       doneCommand       `cmd:"" help:"Mark a claimed task complete (releasing it)."`
-	Leave      leaveCommand      `cmd:"" help:"Clear this agent's presence (announce you're gone now)."`
+	Leave      leaveCommand      `cmd:"" help:"Clear all presence entries for the current session."`
 	Who        whoCommand        `cmd:"" help:"List agents currently present (role, claim load, TTL left)."`
+	Lease      leaseCommand      `cmd:"" help:"Acquire, renew, release, and list enforceable resource leases."`
+	Guard      guardCommand      `cmd:"" help:"Check whether resources are safe to use."`
+	Window     windowCommand     `cmd:"" help:"Coordinate acknowledged exclusive quiet windows."`
+	Work       workCommand       `cmd:"" help:"Publish canonical current work state."`
+	Status     statusCommand     `cmd:"" help:"Show recoverable current coordination state."`
+	Version    versionCommand    `cmd:"" help:"Report source and running executable identity."`
 	Hook       hookCommand       `cmd:"" help:"Handle an agent lifecycle hook event."`
 	Welcome    welcomeCommand    `cmd:"" help:"Post the canonical welcome to the lobby and pin it (no expiry)."`
 }
@@ -121,7 +129,25 @@ func executeWithIO(ctx context.Context, args []string, out, errOut io.Writer) er
 	app.Tail.Agent, app.Post.Agent, app.Wait.Agent = agent, agent, agent
 	app.Ask.Agent, app.Reply.Agent, app.Claim.Agent = agent, agent, agent
 	app.Done.Agent, app.Leave.Agent, app.Who.Agent = agent, agent, agent
-	parser, err := kong.New(&app, kong.Name("agentroom"), kong.Description("Join an agentroom event mesh: tail, post, and claim work"), kong.Writers(out, errOut), kong.Bind(&app.globals), kong.BindTo(ctx, (*context.Context)(nil)))
+	app.Lease.Acquire.Agent, app.Lease.Renew.Agent, app.Lease.Release.Agent = agent, agent, agent
+	app.Guard.Agent = agent
+	app.Window.Request.Agent, app.Window.Ack.Agent, app.Window.Activate.Agent = agent, agent, agent
+	app.Window.Release.Agent, app.Window.Cancel.Agent = agent, agent
+	app.Work.Agent = agent
+	parser, err := kong.New(
+		&app,
+		kong.Name("agentroom"),
+		kong.Description("Join an agentroom event mesh: tail, post, and claim work"),
+		kong.Writers(out, errOut),
+		kong.Bind(&app.globals),
+		kong.BindTo(ctx, (*context.Context)(nil)),
+		kong.ConfigureHelp(kong.HelpOptions{
+			Compact:   true,
+			Tree:      true,
+			Summary:   true,
+			FlagsLast: true,
+		}),
+	)
 	if err != nil {
 		return err
 	}
@@ -260,365 +286,4 @@ func resolveRoomIdentity(ctx context.Context, repo, branch string, repoSet, bran
 		branch = gitBranch
 	}
 	return repo, branch
-}
-
-type tailCommand struct {
-	Count int64  `default:"20" help:"Number of recent events to show."`
-	Agent string `help:"Agent id to attribute presence to."`
-}
-
-func (c *tailCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	events, err := room.Recent(ctx, c.Count)
-	if err != nil {
-		return err
-	}
-	for _, e := range events {
-		printEvent(e)
-	}
-	agent := resolveAgent(c.Agent)
-	writeHeartbeat(ctx, room, agent, "")
-	return nil
-}
-
-type postCommand struct {
-	Type    string `arg:""`
-	Payload string `arg:"" optional:""`
-	Agent   string `help:"Agent id to attribute the event to."`
-	To      string `help:"Directed recipient: a room key or agent handle (empty = broadcast)."`
-}
-
-func (c *postCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	agent := resolveAgent(c.Agent)
-	rawTo := c.To
-	to, err := resolveTarget(ctx, room, rawTo)
-	if err != nil {
-		return err
-	}
-	if rawTo != "" && to == rawTo && !strings.Contains(rawTo, ":") {
-		_, _ = fmt.Fprintf(g.Err, "warning: no live agent matches --to %q; posting verbatim\n", rawTo)
-	}
-	inboxRecipient := durableInboxRecipient(rawTo)
-	var payload []byte
-	if c.Payload != "" {
-		payload = []byte(c.Payload)
-	}
-	ev := &agentroom.Event{Type: c.Type, AgentID: agent, To: to, Payload: payload}
-	if err := room.Publish(ctx, ev); err != nil {
-		return err
-	}
-	if inboxRecipient != "" {
-		if err := room.EnqueueInbox(ctx, inboxRecipient, *ev); err != nil {
-			return fmt.Errorf("posted %s as %s (entry %s), but durable inbox enqueue failed: %w", ev.Type, agent, ev.ID, err)
-		}
-	}
-	// Opportunistic heartbeat: every CLI call refreshes the agent's
-	// presence TTL key — this is the heartbeat in a daemonless CLI.
-	writeHeartbeat(ctx, room, agent, joinDesc(payload))
-	outf("posted %s as %s (entry %s)\n", ev.Type, agent, ev.ID)
-	return nil
-}
-
-type waitCommand struct {
-	Agent   string        `help:"Agent id to match when --to-me is set."`
-	ToMe    bool          `name:"to-me" help:"Only unblock for events directed to this agent."`
-	Timeout time.Duration `help:"Maximum time to wait (0 = wait until interrupted)."`
-}
-
-func (c *waitCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	agent := resolveAgent(c.Agent)
-	writeHeartbeat(ctx, room, agent, "")
-	ev, err := waitForEvent(ctx, room, agent, c.ToMe, c.Timeout)
-	if err != nil {
-		return err
-	}
-	printEvent(ev)
-	return nil
-}
-
-func waitForEvent(ctx context.Context, room *agentroom.Room, agent string, toMe bool, timeout time.Duration) (agentroom.Event, error) {
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	lastID, err := room.LastID(ctx)
-	if err != nil {
-		return agentroom.Event{}, err
-	}
-	for {
-		events, err := room.Wait(ctx, lastID, 2*time.Second, 10)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && timeout > 0 {
-				return agentroom.Event{}, fmt.Errorf("wait timed out after %s", timeout)
-			}
-			return agentroom.Event{}, err
-		}
-		for _, ev := range events {
-			lastID = ev.ID
-			if toMe && ev.To != agent {
-				continue
-			}
-			return ev, nil
-		}
-	}
-}
-
-// resolveTarget turns a human --to value into the live qualified roster ID when
-// possible. Room keys ("repo:branch") pass through; exact roster IDs win; then a
-// unique prefix match wins. Ambiguous prefixes are rejected with candidates so a
-// directed post never guesses between two live agents.
-func resolveTarget(ctx context.Context, room *agentroom.Room, raw string) (string, error) {
-	if raw == "" || strings.Contains(raw, ":") {
-		return raw, nil
-	}
-	target, candidates, err := matchLiveTarget(ctx, room, raw)
-	if err != nil {
-		return "", err
-	}
-	switch len(candidates) {
-	case 0:
-		return raw, nil
-	case 1:
-		return target, nil
-	default:
-		return "", fmt.Errorf("--to %q is ambiguous; candidates: %s", raw, strings.Join(candidates, ", "))
-	}
-}
-
-func matchLiveTarget(ctx context.Context, room *agentroom.Room, raw string) (string, []string, error) {
-	pres, err := room.PresenceDetailed(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	if _, ok := pres[raw]; ok {
-		return raw, []string{raw}, nil
-	}
-	candidates := make([]string, 0)
-	for id := range pres {
-		if strings.HasPrefix(id, raw) {
-			candidates = append(candidates, id)
-		}
-	}
-	sort.Strings(candidates)
-	if len(candidates) == 1 {
-		return candidates[0], candidates, nil
-	}
-	return "", candidates, nil
-}
-
-func durableInboxRecipient(rawTo string) string {
-	if rawTo == "" || strings.Contains(rawTo, ":") {
-		return ""
-	}
-	return sanitizeHandle(rawTo)
-}
-
-type catalogCommand struct{}
-
-func (*catalogCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	defs, err := room.Catalog(ctx)
-	if err != nil {
-		return err
-	}
-	if len(defs) == 0 {
-		outln("(catalog is empty)")
-		return nil
-	}
-	for _, d := range defs {
-		outf("%-16s %s\n", d.Type, d.Description)
-		outf("%16s produces=%s requires=%s\n", "", d.Produces, d.Requires)
-		if d.Prerequisite != "" {
-			outf("%16s prereq=%s\n", "", d.Prerequisite)
-		}
-	}
-	return nil
-}
-
-type registerCommand struct {
-	Type        string `arg:""`
-	Description string `arg:""`
-	Produces    string `help:"Event type emitted on success."`
-	Requires    string `help:"Capability an agent needs to handle it."`
-	Prereq      string `help:"Event type that must exist before this task may be claimed."`
-}
-
-func (c *registerCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	def := agentroom.TaskDef{Type: c.Type, Description: c.Description, Produces: c.Produces, Requires: c.Requires, Prerequisite: c.Prereq}
-	if err := room.RegisterTask(ctx, def); err != nil {
-		return err
-	}
-	outf("registered task type %s\n", def.Type)
-	return nil
-}
-
-type openCommand struct {
-	Count int64 `default:"50" help:"How many recent stream entries to scan (capped at 100)."`
-}
-
-func (c *openCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	tasks, err := room.OpenTasks(ctx, c.Count)
-	if err != nil {
-		return err
-	}
-	if len(tasks) == 0 {
-		outln("(no open tasks)")
-		return nil
-	}
-	for _, tk := range tasks {
-		outf("%s  %-16s %s\n", tk.ID, tk.Type, tk.Payload)
-	}
-	return nil
-}
-
-type claimCommand struct {
-	TaskID string        `arg:"" name:"task-id"`
-	Agent  string        `help:"Agent id claiming the task."`
-	TTL    time.Duration `default:"5m" help:"Claim lease before another agent may reclaim."`
-	Force  bool          `help:"Bypass the declared prerequisite gate and claim unconditionally."`
-}
-
-func (c *claimCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	agent := resolveAgent(c.Agent)
-	var (
-		ok  bool
-		err error
-	)
-	if c.Force {
-		ok, err = room.Claim(ctx, c.TaskID, agent, c.TTL)
-	} else {
-		ok, err = room.ClaimChecked(ctx, c.TaskID, agent, c.TTL)
-	}
-	if err != nil {
-		return err
-	}
-	if !ok {
-		outf("task %s is already claimed or done -- skip it\n", c.TaskID)
-		return nil
-	}
-	writeHeartbeat(ctx, room, agent, "")
-	outf("claimed task %s as %s (lease %s)\n", c.TaskID, agent, c.TTL)
-	return nil
-}
-
-type doneCommand struct {
-	TaskID string `arg:"" name:"task-id"`
-	Result string `arg:"" optional:""`
-	Agent  string `help:"Agent id completing the task."`
-}
-
-func (c *doneCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	agent := resolveAgent(c.Agent)
-	var result []byte
-	if c.Result != "" {
-		result = []byte(c.Result)
-	}
-	if err := room.Complete(ctx, c.TaskID, result); err != nil {
-		return err
-	}
-	writeHeartbeat(ctx, room, agent, "")
-	outf("completed task %s\n", c.TaskID)
-	return nil
-}
-
-type leaveCommand struct {
-	Agent string `help:"Agent id to clear presence for."`
-}
-
-func (c *leaveCommand) Run(ctx context.Context, g *globals) error {
-	room, rdb := g.room(ctx)
-	defer func() { _ = rdb.Close() }()
-	agent := resolveAgent(c.Agent)
-	if err := room.ClearPresence(ctx, agent); err != nil {
-		return err
-	}
-	outf("cleared presence for %s\n", agent)
-	return nil
-}
-
-func printEvent(e agentroom.Event) {
-	ts := ""
-	if e.Timestamp > 0 {
-		ts = time.Unix(0, e.Timestamp).Format("15:04:05")
-	}
-	outf("%-16s %-8s %-16s %s\n", e.ID, ts, e.Type, e.AgentID)
-	if len(e.Payload) > 0 {
-		outf("    %s\n", e.Payload)
-	}
-}
-
-// defaultAgent is the human label manual CLI commands attribute presence and
-// task claims to BEFORE qualification. AGENTROOM_AGENT pins it explicitly;
-// otherwise it is the bare "cli" label. resolveAgent/qualifyAgent then append a
-// per-session token so two agents that pick the same label never share a key.
-func defaultAgent() string {
-	if v := os.Getenv("AGENTROOM_AGENT"); v != "" {
-		return v
-	}
-	return defaultHandle
-}
-
-// sessionToken is the per-session disambiguator appended to every handle.
-// CLAUDE_SESSION_ID (exposed to Bash tool commands by Claude Code) is preferred:
-// it is stable across every call in one session and matches the token the hook
-// presence path derives via shortSession. Outside a Claude session it falls back
-// to <hostname>-<ppid> -- stable per terminal, distinct between concurrent shells.
-func sessionToken() string {
-	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		return shortSession(id)
-	}
-	host := "cli"
-	if h, err := os.Hostname(); err == nil && h != "" {
-		host = h
-	}
-	return fmt.Sprintf("%s-%d", host, os.Getppid())
-}
-
-// sanitizeHandle replaces characters that would corrupt Redis key structure
-// (':' is the key separator), plus whitespace, with '-'. Alphanumerics and
-// '-' '_' '@' '.' pass through unchanged.
-func sanitizeHandle(h string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ':', '*', '?', '[', ']', ' ', '\t', '\n', '\r':
-			return '-'
-		}
-		return r
-	}, h)
-}
-
-// qualifyAgent makes a handle collision-proof: sanitize the label, then append
-// the session token so two agents that pick the same name never share a key.
-func qualifyAgent(handle string) string {
-	h := sanitizeHandle(handle)
-	tok := sessionToken()
-	if h == "" {
-		return tok
-	}
-	return h + "-" + tok
-}
-
-// resolveAgent reads the --agent flag and qualifies it: the single source of
-// truth for the identity a command acts as (presence key, event attribution,
-// claim owner).
-func resolveAgent(raw string) string {
-	if raw == "" {
-		raw = defaultAgent()
-	}
-	return qualifyAgent(raw)
 }

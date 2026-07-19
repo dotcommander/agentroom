@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -44,12 +42,14 @@ func (r *Room) Publish(ctx context.Context, ev *Event) error {
 	args := &redis.XAddArgs{
 		Stream: r.cfg.StreamKey(),
 		Values: map[string]any{
-			"type":      ev.Type,
-			"agent_id":  ev.AgentID,
-			"to":        ev.To,
-			"reply_to":  ev.ReplyTo,
-			"payload":   []byte(ev.Payload),
-			"timestamp": ev.Timestamp,
+			"type":         ev.Type,
+			"agent_id":     ev.AgentID,
+			"agent_handle": ev.AgentHandle,
+			"session_id":   ev.SessionID,
+			"to":           ev.To,
+			"reply_to":     ev.ReplyTo,
+			"payload":      []byte(ev.Payload),
+			"timestamp":    ev.Timestamp,
 		},
 	}
 	if r.cfg.StreamMaxLen > 0 {
@@ -129,92 +129,6 @@ func (r *Room) EndAsk(ctx context.Context, agentID, token string) error {
 	return nil
 }
 
-// EnqueueInbox writes ev to recipient's durable directed inbox. The normal room
-// stream remains the source of global ordering; source_id ties this inbox copy
-// back to the room entry for dedupe during hook injection.
-func (r *Room) EnqueueInbox(ctx context.Context, recipient string, ev Event) error {
-	if recipient == "" {
-		return nil
-	}
-	args := &redis.XAddArgs{
-		Stream: r.cfg.InboxKey(recipient),
-		Values: map[string]any{
-			"source_stream": r.cfg.StreamKey(),
-			"source_id":     ev.ID,
-			"type":          ev.Type,
-			"agent_id":      ev.AgentID,
-			"to":            ev.To,
-			"reply_to":      ev.ReplyTo,
-			"payload":       []byte(ev.Payload),
-			"timestamp":     ev.Timestamp,
-		},
-	}
-	if r.cfg.InboxMaxLen > 0 {
-		args.MaxLen = r.cfg.InboxMaxLen
-		args.Approx = true
-	}
-	pipe := r.rdb.Pipeline()
-	pipe.XAdd(ctx, args)
-	if r.cfg.InboxTTL > 0 {
-		pipe.Expire(ctx, r.cfg.InboxKey(recipient), r.cfg.InboxTTL)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("agentroom: enqueue inbox %s: %w", recipient, err)
-	}
-	return nil
-}
-
-// InboxSince returns up to count durable directed inbox entries strictly after
-// cursor. A missing cursor starts from 0-0, unlike room-stream session cursors,
-// so offline messages are delivered instead of baselining to the stream tail.
-func (r *Room) InboxSince(ctx context.Context, recipient, cursor string, count int64) ([]InboxEvent, error) {
-	if recipient == "" {
-		return nil, nil
-	}
-	if cursor == "" {
-		cursor = streamStartID
-	}
-	if count <= 0 {
-		count = 1
-	}
-	msgs, err := r.rdb.XRangeN(ctx, r.cfg.InboxKey(recipient), cursor, "+", count+1).Result()
-	if err != nil {
-		return nil, fmt.Errorf("agentroom: inbox since %s: %w", recipient, err)
-	}
-	events := make([]InboxEvent, 0, len(msgs))
-	for _, msg := range msgs {
-		if msg.ID == cursor {
-			continue
-		}
-		events = append(events, decodeInboxEvent(msg))
-	}
-	if int64(len(events)) > count {
-		events = events[:count]
-	}
-	return events, nil
-}
-
-// ReadInboxCursor returns the last delivered inbox entry ID for recipient, or ""
-// when no cursor exists yet.
-func (r *Room) ReadInboxCursor(ctx context.Context, recipient string) (string, error) {
-	id, err := r.rdb.Get(ctx, r.cfg.InboxCursorKey(recipient)).Result()
-	if errors.Is(err, redis.Nil) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("agentroom: read inbox cursor %s: %w", recipient, err)
-	}
-	return id, nil
-}
-
-// WriteInboxCursor stores the last delivered inbox entry ID for recipient.
-func (r *Room) WriteInboxCursor(ctx context.Context, recipient, id string, ttl time.Duration) error {
-	if err := r.rdb.Set(ctx, r.cfg.InboxCursorKey(recipient), id, ttl).Err(); err != nil {
-		return fmt.Errorf("agentroom: write inbox cursor %s: %w", recipient, err)
-	}
-	return nil
-}
-
 // directedScanWindow bounds how far back Directed scans for messages addressed
 // to an agent — directed messages are sparse among broadcasts, so it reads a
 // wide recent slice and filters rather than maintaining a per-recipient index.
@@ -281,6 +195,20 @@ func (r *Room) Since(ctx context.Context, lastID string, count int64) ([]Event, 
 	}
 	if int64(len(events)) > count {
 		events = events[:count]
+	}
+	return events, nil
+}
+
+// RecentSince returns the most recent events strictly after lastID, preserving
+// chronological output order while bounding the reverse scan.
+func (r *Room) RecentSince(ctx context.Context, lastID string, count int64) ([]Event, error) {
+	msgs, err := r.rdb.XRevRangeN(ctx, r.cfg.StreamKey(), "+", "("+lastID, count).Result()
+	if err != nil {
+		return nil, fmt.Errorf("agentroom: recent since %s: %w", lastID, err)
+	}
+	events := make([]Event, len(msgs))
+	for i, msg := range msgs {
+		events[len(msgs)-1-i] = decodeEvent(msg)
 	}
 	return events, nil
 }
@@ -362,209 +290,4 @@ func (r *Room) WriteCursor(ctx context.Context, sessionID, id string, ttl time.D
 // is a parameter for testability.
 func (r *Room) ReplayCursorFrom(now time.Time, window time.Duration) string {
 	return fmt.Sprintf("%d-0", now.Add(-window).UnixMilli())
-}
-
-// Heartbeat writes (or refreshes) this agent's live-presence record: a TTL key
-// holding desc (role / working_on). It is called on join and on every CLI
-// invocation, so the key auto-expires ttl after the agent's last activity — a
-// crashed agent drops from presence with no SESSION_ENDED needed.
-func (r *Room) Heartbeat(ctx context.Context, agentID, desc string, ttl time.Duration) error {
-	pipe := r.rdb.Pipeline()
-	pipe.Set(ctx, r.cfg.PresenceKey(agentID), desc, ttl)
-	pipe.ZAdd(ctx, r.cfg.PresenceIndexKey(), redis.Z{
-		Score:  presenceExpiryScore(ttl),
-		Member: agentID,
-	})
-	if r.cfg.StreamTTL > 0 {
-		pipe.Expire(ctx, r.cfg.PresenceIndexKey(), r.cfg.StreamTTL)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("agentroom: heartbeat %s: %w", agentID, err)
-	}
-	return nil
-}
-
-// refreshPresenceScript refreshes a presence key's TTL without disturbing its
-// description; if the key is absent it creates a label-less record. This keeps
-// liveness-only activity (claim/tail/non-JOINED post) from clobbering a role
-// label or hook-inferred working-on label while still registering liveness.
-var refreshPresenceScript = redis.NewScript(`
-if redis.call('pexpire', KEYS[1], ARGV[1]) == 0 then
-	redis.call('set', KEYS[1], '', 'PX', ARGV[1])
-end
-redis.call('zadd', KEYS[2], ARGV[3], ARGV[2])
-return 1
-`)
-
-// RefreshPresence extends agentID's presence TTL, preserving any existing
-// description, and creates an empty record if none exists.
-func (r *Room) RefreshPresence(ctx context.Context, agentID string, ttl time.Duration) error {
-	keys := []string{r.cfg.PresenceKey(agentID), r.cfg.PresenceIndexKey()}
-	if err := refreshPresenceScript.Run(ctx, r.rdb, keys, ttl.Milliseconds(), agentID, presenceExpiryScore(ttl)).Err(); err != nil {
-		return fmt.Errorf("agentroom: refresh presence %s: %w", agentID, err)
-	}
-	return nil
-}
-
-// RefreshSessionPresence refreshes the TTL of every "<handle>-<sessionToken>"
-// presence key — the named records a manual `AGENT_JOINED --agent <handle>`
-// created — preserving each description via RefreshPresence. The per-prompt hook
-// calls this so a named roster entry stays live alongside the bare session key
-// instead of expiring after PresenceTTL while only the anonymous session line is
-// refreshed (the presence identity-split bug). The bare "<sessionToken>" key has
-// no "-" separator and is refreshed separately by the hook's own heartbeat.
-func (r *Room) RefreshSessionPresence(ctx context.Context, sessionToken string, ttl time.Duration) error {
-	if sessionToken == "" {
-		return nil
-	}
-	agentIDs, err := r.activePresenceAgentIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("agentroom: read session presence %s: %w", sessionToken, err)
-	}
-	for _, agentID := range agentIDs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !strings.HasSuffix(agentID, "-"+sessionToken) {
-			continue
-		}
-		if err := r.RefreshPresence(ctx, agentID, ttl); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ClearPresence deletes this agent's presence record for a clean fast exit
-// (called on SESSION_ENDED). Absence of the key is not an error.
-func (r *Room) ClearPresence(ctx context.Context, agentID string) error {
-	pipe := r.rdb.Pipeline()
-	pipe.Del(ctx, r.cfg.PresenceKey(agentID))
-	pipe.ZRem(ctx, r.cfg.PresenceIndexKey(), agentID)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("agentroom: clear presence %s: %w", agentID, err)
-	}
-	return nil
-}
-
-// Presence returns the live presence set as agentID -> description from the
-// room's indexed presence roster. Expired keys are simply absent. This is the
-// liveness-backed replacement for folding AGENT_JOINED/SESSION_ENDED off the
-// event stream.
-func (r *Room) Presence(ctx context.Context) (map[string]string, error) {
-	entries, err := r.presenceScan(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(entries))
-	for id, e := range entries {
-		out[id] = e.Desc
-	}
-	return out, nil
-}
-
-// PresenceEntry is one live roster record: the agent's free-form description and
-// the time left on its presence TTL before it drops absent a refresh. Surfaced
-// by the `who` command; Presence (the hot digest path) omits the TTL so it only
-// batches description reads.
-type PresenceEntry struct {
-	Desc string
-	TTL  time.Duration
-}
-
-// PresenceDetailed is Presence plus each key's remaining TTL — the on-demand
-// roster view behind `who`. It uses the same indexed roster read and additionally
-// batches PTTL reads. Keys that expire mid-read are skipped. Kept separate from
-// Presence so the per-prompt digest path does not read TTLs.
-func (r *Room) PresenceDetailed(ctx context.Context) (map[string]PresenceEntry, error) {
-	return r.presenceScan(ctx, true)
-}
-
-// presenceScan is the shared indexed read behind Presence and PresenceDetailed:
-// it trims expired roster index entries, reads active agent IDs from the room's
-// ZSET, then batches description reads and — only when withTTL — TTL reads. Keys
-// that expire between the index read and batched reads are skipped.
-func (r *Room) presenceScan(ctx context.Context, withTTL bool) (map[string]PresenceEntry, error) {
-	prefix := r.cfg.PresencePrefix()
-	agentIDs, err := r.activePresenceAgentIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(agentIDs) == 0 {
-		return map[string]PresenceEntry{}, nil
-	}
-	pipe := r.rdb.Pipeline()
-	entries := make([]presenceReadCmds, 0, len(agentIDs))
-	for _, agentID := range agentIDs {
-		key := prefix + agentID
-		cmds := presenceReadCmds{
-			key:  key,
-			desc: pipe.Get(ctx, key),
-		}
-		if withTTL {
-			cmds.ttl = pipe.PTTL(ctx, key)
-		}
-		entries = append(entries, cmds)
-	}
-	_, _ = pipe.Exec(ctx)
-	return presenceEntries(prefix, entries, withTTL)
-}
-
-func (r *Room) activePresenceAgentIDs(ctx context.Context) ([]string, error) {
-	now := time.Now().UnixMilli()
-	pipe := r.rdb.Pipeline()
-	pipe.ZRemRangeByScore(ctx, r.cfg.PresenceIndexKey(), "-inf", strconv.FormatInt(now, 10))
-	active := pipe.ZRangeByScore(ctx, r.cfg.PresenceIndexKey(), &redis.ZRangeBy{
-		Min: strconv.FormatInt(now, 10),
-		Max: "+inf",
-	})
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, fmt.Errorf("agentroom: read presence index: %w", err)
-	}
-	return active.Result()
-}
-
-func presenceExpiryScore(ttl time.Duration) float64 {
-	return float64(time.Now().Add(ttl).UnixMilli())
-}
-
-type presenceReadCmds struct {
-	key  string
-	desc *redis.StringCmd
-	ttl  *redis.DurationCmd
-}
-
-func presenceEntries(prefix string, entries []presenceReadCmds, withTTL bool) (map[string]PresenceEntry, error) {
-	out := make(map[string]PresenceEntry, len(entries))
-	for _, cmds := range entries {
-		desc, err := cmds.desc.Result()
-		if errors.Is(err, redis.Nil) {
-			continue // key expired between SCAN and GET — not present
-		}
-		if err != nil {
-			return nil, fmt.Errorf("agentroom: read presence %s: %w", cmds.key, err)
-		}
-		entry := PresenceEntry{Desc: desc}
-		if withTTL {
-			ttl, err := cmds.ttl.Result()
-			if errors.Is(err, redis.Nil) {
-				continue // key expired between GET and PTTL — not present
-			}
-			if err != nil {
-				return nil, fmt.Errorf("agentroom: ttl presence %s: %w", cmds.key, err)
-			}
-			entry.TTL = ttl
-		}
-		out[strings.TrimPrefix(cmds.key, prefix)] = entry
-	}
-	return out, nil
-}
-
-func decodeInboxEvent(msg redis.XMessage) InboxEvent {
-	return InboxEvent{
-		ID:           msg.ID,
-		SourceStream: stringField(msg.Values, "source_stream"),
-		SourceID:     stringField(msg.Values, "source_id"),
-		Event:        decodeEvent(msg),
-	}
 }

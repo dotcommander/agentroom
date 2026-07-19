@@ -33,8 +33,36 @@ func TestSessionTokenUsesClaudeSessionID(t *testing.T) {
 	}
 }
 
-func TestSessionTokenFallsBackWithoutSession(t *testing.T) {
+func TestSessionTokenPrecedence(t *testing.T) {
+	t.Setenv("AGENTROOM_SESSION_ID", "agentroom-session")
+	t.Setenv("CLAUDE_SESSION_ID", "claude-session")
+	t.Setenv("CODEX_THREAD_ID", "codex-thread")
+	t.Setenv("TERM_SESSION_ID", "term-session")
+	if got := sessionToken(); got != "agentroo" {
+		t.Fatalf("sessionToken() = %q, want AGENTROOM_SESSION_ID token", got)
+	}
+
+	t.Setenv("AGENTROOM_SESSION_ID", "")
+	if got := sessionToken(); got != "claude-s" {
+		t.Fatalf("sessionToken() = %q, want CLAUDE_SESSION_ID token", got)
+	}
+
 	t.Setenv("CLAUDE_SESSION_ID", "")
+	if got := sessionToken(); got != "codex-th" {
+		t.Fatalf("sessionToken() = %q, want CODEX_THREAD_ID token", got)
+	}
+
+	t.Setenv("CODEX_THREAD_ID", "")
+	if got := sessionToken(); got != "term-ses" {
+		t.Fatalf("sessionToken() = %q, want TERM_SESSION_ID token", got)
+	}
+}
+
+func TestSessionTokenFallsBackWithoutSession(t *testing.T) {
+	t.Setenv("AGENTROOM_SESSION_ID", "")
+	t.Setenv("CLAUDE_SESSION_ID", "")
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("TERM_SESSION_ID", "")
 	got := sessionToken()
 	if strings.Contains(got, "-") == false {
 		t.Fatalf("fallback sessionToken() = %q, want host-ppid form", got)
@@ -62,5 +90,14 @@ func TestQualifyAgentEmptyHandleIsBareToken(t *testing.T) {
 	t.Setenv("CLAUDE_SESSION_ID", "a1b2c3d4-5678")
 	if got := qualifyAgent(""); got != "a1b2c3d4" {
 		t.Fatalf("qualifyAgent(\"\") = %q, want %q", got, "a1b2c3d4")
+	}
+}
+
+func TestQualifyAgentIsIdempotent(t *testing.T) {
+	t.Setenv("CLAUDE_SESSION_ID", "a1b2c3d4-5678")
+	for _, input := range []string{"opus-pidrive-a1b2c3d4", "a1b2c3d4"} {
+		if got := qualifyAgent(input); got != input {
+			t.Fatalf("qualifyAgent(%q) = %q, want unchanged", input, got)
+		}
 	}
 }

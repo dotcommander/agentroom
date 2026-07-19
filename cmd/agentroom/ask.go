@@ -46,7 +46,8 @@ func (c *askCommand) Run(ctx context.Context, g *globals) error {
 	}
 	defer func() { _ = room.EndAsk(context.WithoutCancel(ctx), agent, lockToken) }()
 
-	ev := &agentroom.Event{Type: eventAsk, AgentID: agent, To: to, Payload: []byte(c.Message)}
+	handle, sessionID := eventIdentity(agent)
+	ev := &agentroom.Event{Type: eventAsk, AgentID: agent, AgentHandle: handle, SessionID: sessionID, To: to, Payload: []byte(c.Message)}
 	if err := room.Publish(ctx, ev); err != nil {
 		return err
 	}
@@ -68,7 +69,7 @@ func (c *askCommand) Run(ctx context.Context, g *globals) error {
 	if err != nil {
 		return err
 	}
-	printEvent(reply)
+	printEvent(g.Out, reply)
 	return nil
 }
 
@@ -94,12 +95,15 @@ func (c *replyCommand) Run(ctx context.Context, g *globals) error {
 	}
 
 	agent := resolveAgent(c.Agent)
+	handle, sessionID := eventIdentity(agent)
 	ev := &agentroom.Event{
-		Type:    eventReply,
-		AgentID: agent,
-		To:      ask.AgentID,
-		ReplyTo: ask.ID,
-		Payload: []byte(c.Message),
+		Type:        eventReply,
+		AgentID:     agent,
+		AgentHandle: handle,
+		SessionID:   sessionID,
+		To:          ask.AgentID,
+		ReplyTo:     ask.ID,
+		Payload:     []byte(c.Message),
 	}
 	if err := room.Publish(ctx, ev); err != nil {
 		return err

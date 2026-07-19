@@ -77,6 +77,12 @@ func TestPresenceLinesShape(t *testing.T) {
 			claims: 3,
 			want:   []string{"  carol (3 claimed)"},
 		},
+		{
+			name:   "terminal controls are stripped from roster fields",
+			pres:   map[string]string{"alice\x1b[2J": "builder\x1b]0;spoof\x07"},
+			selfID: "",
+			want:   []string{"  alice -- builder"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

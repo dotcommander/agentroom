@@ -261,6 +261,8 @@ func decodeEvent(msg redis.XMessage) Event {
 	ev := Event{ID: msg.ID}
 	ev.Type = stringField(msg.Values, "type")
 	ev.AgentID = stringField(msg.Values, "agent_id")
+	ev.AgentHandle = stringField(msg.Values, "agent_handle")
+	ev.SessionID = stringField(msg.Values, "session_id")
 	ev.To = stringField(msg.Values, "to")
 	ev.ReplyTo = stringField(msg.Values, "reply_to")
 	if p := stringField(msg.Values, "payload"); p != "" {

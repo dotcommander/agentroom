@@ -14,16 +14,16 @@ func TestHeartbeatWritesPresenceKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires redis (miniredis)")
 	}
-	room, mr := newTestRoom(t)
+	room, _ := newTestRoom(t)
 	if err := room.Heartbeat(context.Background(), "agent-1", "role=fixer", time.Minute); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
-	got, err := mr.Get(room.cfg.PresenceKey("agent-1"))
+	got, err := room.Presence(context.Background())
 	if err != nil {
 		t.Fatalf("get presence key: %v", err)
 	}
-	if got != "role=fixer" {
-		t.Fatalf("presence desc = %q, want %q", got, "role=fixer")
+	if got["agent-1"] != "role=fixer" {
+		t.Fatalf("presence desc = %q, want %q", got["agent-1"], "role=fixer")
 	}
 }
 
@@ -132,12 +132,12 @@ func TestRefreshPresencePreservesDesc(t *testing.T) {
 	if err := room.RefreshPresence(ctx, "a1", time.Minute); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	got, err := mr.Get(key)
+	got, err := room.Presence(ctx)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got != "role=x" {
-		t.Fatalf("desc after refresh = %q, want %q", got, "role=x")
+	if got["a1"] != "role=x" {
+		t.Fatalf("desc after refresh = %q, want %q", got["a1"], "role=x")
 	}
 	if ttl := mr.TTL(key); ttl <= 30*time.Second {
 		t.Fatalf("ttl after refresh = %v, want > 30s", ttl)

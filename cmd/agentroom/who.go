@@ -27,7 +27,7 @@ func (c *whoCommand) Run(ctx context.Context, g *globals) error {
 		return err
 	}
 	for _, line := range whoLines(pres, resolveAgent(c.Agent), claimsCounter(ctx, room)) {
-		outln(line)
+		_, _ = fmt.Fprintln(g.Out, line)
 	}
 	return nil
 }
@@ -61,11 +61,11 @@ func whoLines(pres map[string]agentroom.PresenceEntry, selfID string, claimsFor 
 // (or "(no role posted)" when blank), an optional claim count, the remaining
 // presence TTL, and a "(you)" tag when isSelf.
 func whoLine(id string, e agentroom.PresenceEntry, width, claims int, isSelf bool) string {
-	desc := e.Desc
+	desc := terminalText(e.Desc)
 	if desc == "" {
 		desc = "(no role posted)"
 	}
-	line := fmt.Sprintf("%-*s  %s", width, id, desc)
+	line := fmt.Sprintf("%-*s  %s", width, terminalText(id), desc)
 	if claims > 0 {
 		line += fmt.Sprintf("  (%d claimed)", claims)
 	}

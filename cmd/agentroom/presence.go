@@ -81,9 +81,9 @@ func presenceLines(pres map[string]string, selfID string, claimsFor func(agentID
 // claims. The suffix is omitted when N == 0 (or unknown), preserving the
 // desc-only and id-only shapes for agents with no current load.
 func presenceLine(id, desc string, claims int) string {
-	line := "  " + id
+	line := "  " + terminalText(id)
 	if desc != "" {
-		line += " -- " + desc
+		line += " -- " + terminalText(desc)
 	}
 	if claims > 0 {
 		line += fmt.Sprintf(" (%d claimed)", claims)
@@ -104,11 +104,11 @@ func joinDesc(p []byte) string {
 	}
 	switch {
 	case j.Role != "" && j.WorkingOn != "":
-		return clip(j.Role+": "+j.WorkingOn, 160)
+		return clip(terminalText(j.Role)+": "+terminalText(j.WorkingOn), 160)
 	case j.Role != "":
-		return clip(j.Role, 160)
+		return clip(terminalText(j.Role), 160)
 	default:
-		return clip(j.WorkingOn, 160)
+		return clip(terminalText(j.WorkingOn), 160)
 	}
 }
 
@@ -122,10 +122,26 @@ func writeHeartbeat(ctx context.Context, room *agentroom.Room, agentID, desc str
 	// Empty desc means "just refresh liveness" (claim/tail/non-JOINED post):
 	// refresh the TTL without overwriting a role label or inferred prompt label.
 	if desc == "" {
-		_ = room.RefreshPresence(ctx, agentID, room.Config().PresenceTTL)
+		_ = room.RefreshPresenceIdentity(ctx, agentroom.AgentIdentity{
+			Handle:    agentHandle(agentID),
+			SessionID: sessionToken(),
+			AgentID:   agentID,
+		}, room.Config().PresenceTTL)
 		return
 	}
-	_ = room.Heartbeat(ctx, agentID, desc, room.Config().PresenceTTL)
+	_ = room.HeartbeatIdentity(ctx, agentroom.AgentIdentity{
+		Handle:    agentHandle(agentID),
+		SessionID: sessionToken(),
+		AgentID:   agentID,
+	}, desc, room.Config().PresenceTTL)
+}
+
+func agentHandle(agentID string) string {
+	token := sessionToken()
+	if agentID == token {
+		return ""
+	}
+	return strings.TrimSuffix(agentID, "-"+token)
 }
 
 // claimsCounter returns a render-time claim-count lookup over room: for each

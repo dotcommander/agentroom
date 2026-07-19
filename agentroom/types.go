@@ -5,6 +5,7 @@ package agentroom
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -12,15 +13,136 @@ import (
 // returns an error, surfacing the failure as a durable, cross-agent event.
 const EventEngineRuntimeError = "ENGINE_RUNTIME_ERROR"
 
+const (
+	defaultResourceLeaseTTL = 15 * time.Minute
+	defaultWindowTTL        = 5 * time.Minute
+	maxResourceLeaseTTL     = 24 * time.Hour
+	terminalWindowTTL       = 24 * time.Hour
+)
+
+var (
+	ErrLeaseConflict       = errors.New("agentroom: resource lease conflict")
+	ErrNotOwner            = errors.New("agentroom: not owner")
+	ErrInvalidState        = errors.New("agentroom: invalid state")
+	ErrAcknowledgmentDue   = errors.New("agentroom: acknowledgments outstanding")
+	ErrResourceLeaseNeeded = errors.New("agentroom: required resource lease missing")
+	ErrCoordinationExpired = errors.New("agentroom: coordination record expired or missing")
+)
+
+// AgentIdentity separates the stable human-facing handle from a session and
+// the compatibility full identifier used by existing event records.
+type AgentIdentity struct {
+	Handle    string `json:"handle"`
+	SessionID string `json:"session_id"`
+	AgentID   string `json:"agent_id"`
+}
+
+// ResourceLeaseRequest describes one atomic resource acquisition.
+type ResourceLeaseRequest struct {
+	Owner     string        `json:"owner"`
+	Resources []string      `json:"resources"`
+	Purpose   string        `json:"purpose"`
+	TTL       time.Duration `json:"-"`
+}
+
+// ResourceLease is a durable, expiring ownership record.
+type ResourceLease struct {
+	ID        string   `json:"id"`
+	Owner     string   `json:"owner"`
+	Resources []string `json:"resources"`
+	Purpose   string   `json:"purpose"`
+	CreatedAt int64    `json:"created_at"`
+	ExpiresAt int64    `json:"expires_at"`
+}
+
+// LeaseConflictError reports the live lease or window preventing acquisition.
+type LeaseConflictError struct {
+	Resource  string `json:"resource"`
+	Conflicts string `json:"conflicts_with"`
+	Owner     string `json:"owner,omitempty"`
+	LeaseID   string `json:"lease_id,omitempty"`
+	WindowID  string `json:"window_id,omitempty"`
+}
+
+func (e *LeaseConflictError) Error() string {
+	return "agentroom: resource " + e.Resource + " conflicts with " + e.Conflicts
+}
+func (e *LeaseConflictError) Is(target error) bool { return target == ErrLeaseConflict }
+
+// OwnershipError identifies an owner-only operation attempted by another agent.
+type OwnershipError struct{ Expected, Actual string }
+
+func (e *OwnershipError) Error() string {
+	return "agentroom: owner is " + e.Expected + ", not " + e.Actual
+}
+func (e *OwnershipError) Is(target error) bool { return target == ErrNotOwner }
+
+// StateError identifies an operation invalid for the record's current state.
+type StateError struct{ State, Operation string }
+
+func (e *StateError) Error() string {
+	return "agentroom: cannot " + e.Operation + " while state is " + e.State
+}
+func (e *StateError) Is(target error) bool { return target == ErrInvalidState }
+
+// ExpiryError identifies an expiring coordination record that is no longer live.
+type ExpiryError struct{ Kind, ID string }
+
+func (e *ExpiryError) Error() string {
+	return "agentroom: " + e.Kind + " " + e.ID + " expired or missing"
+}
+func (e *ExpiryError) Is(target error) bool { return target == ErrCoordinationExpired }
+
+// WindowRequest describes a pending exclusive coordination reservation.
+type WindowRequest struct {
+	Owner      string        `json:"owner"`
+	Resources  []string      `json:"resources"`
+	Purpose    string        `json:"purpose"`
+	TTL        time.Duration `json:"-"`
+	AckTimeout time.Duration `json:"-"`
+	Required   []string      `json:"required,omitempty"`
+}
+
+// CoordinationWindow is the persisted pending, active, or terminal window.
+type CoordinationWindow struct {
+	ID           string   `json:"id"`
+	Owner        string   `json:"owner"`
+	Resources    []string `json:"resources"`
+	Purpose      string   `json:"purpose"`
+	State        string   `json:"state"`
+	Required     []string `json:"required,omitempty"`
+	Acknowledged []string `json:"acknowledged,omitempty"`
+	CreatedAt    int64    `json:"created_at"`
+	AckDeadline  int64    `json:"ack_deadline"`
+	ExpiresAt    int64    `json:"expires_at"`
+	TTLMillis    int64    `json:"-"`
+}
+
+// WorkStatus is the canonical current-state representation used by status UX.
+type WorkStatus struct {
+	SchemaVersion int             `json:"schema_version"`
+	ID            string          `json:"id"`
+	AgentID       string          `json:"agent_id"`
+	State         string          `json:"state"`
+	Scope         string          `json:"scope"`
+	Summary       string          `json:"summary"`
+	To            string          `json:"to,omitempty"`
+	Data          json.RawMessage `json:"data,omitempty"`
+	UpdatedAt     int64           `json:"updated_at"`
+	ExpiresAt     int64           `json:"expires_at"`
+}
+
 // Event is an immutable, timestamped marker in a repo/branch stream.
 type Event struct {
-	ID        string          `json:"id"`                 // stream-assigned entry ID
-	Type      string          `json:"type"`               // e.g. "AST_PARSED", "TESTS_FAILED"
-	AgentID   string          `json:"agent_id"`           // initiating engine
-	To        string          `json:"to,omitempty"`       // directed recipient agent id ("" = broadcast)
-	ReplyTo   string          `json:"reply_to,omitempty"` // stream id this threads under ("" = top-level)
-	Payload   json.RawMessage `json:"payload"`            // small metadata or scratchpad refs
-	Timestamp int64           `json:"timestamp"`          // unix-nano
+	ID          string          `json:"id"`                     // stream-assigned entry ID
+	Type        string          `json:"type"`                   // e.g. "AST_PARSED", "TESTS_FAILED"
+	AgentID     string          `json:"agent_id"`               // compatibility full identifier
+	AgentHandle string          `json:"agent_handle,omitempty"` // stable logical handle
+	SessionID   string          `json:"session_id,omitempty"`   // stable runtime session token
+	To          string          `json:"to,omitempty"`           // directed recipient agent id ("" = broadcast)
+	ReplyTo     string          `json:"reply_to,omitempty"`     // stream id this threads under ("" = top-level)
+	Payload     json.RawMessage `json:"payload"`                // small metadata or scratchpad refs
+	Timestamp   int64           `json:"timestamp"`              // unix-nano
 }
 
 // Config isolates one room to a repo + branch namespace and carries the mesh
@@ -43,6 +165,12 @@ type Config struct {
 	PresenceTTL      time.Duration // per-agent presence key auto-expires this long after the last CLI activity (opportunistic heartbeat)
 	CursorTTL        time.Duration // per-session read-cursor key auto-expires this long after the last refresh; a lost/expired cursor simply re-baselines to the stream tail
 	JoinReplayWindow time.Duration // a freshly-joined session seeds its read cursor this far back instead of the bare tail, so it replays a peer's just-landed events (the join-trap); non-positive disables replay
+	LeasePrefix      string        // optional resource lease record prefix
+	LeaseIndexKey    string        // optional resource lease expiry index
+	WindowPrefix     string        // optional coordination window record prefix
+	WindowIndexKey   string        // optional coordination window expiry index
+	WorkPrefix       string        // optional current work-status record prefix
+	WorkIndexKey     string        // optional current work-status update index
 }
 
 // defaultGroup is the fallback consumer-group name used when Config.Group is
@@ -146,6 +274,12 @@ func (c Config) InboxKey(recipient string) string {
 	return c.roomPrefix() + ":inbox:" + recipient
 }
 
+// InboxRecipientIndexKey tracks recipients with durable inbox streams so hooks
+// can recover session-qualified inboxes without scanning the Redis keyspace.
+func (c Config) InboxRecipientIndexKey() string {
+	return c.roomPrefix() + ":inbox-recipients"
+}
+
 // InboxCursorKey stores the last delivered entry ID for one recipient inbox.
 func (c Config) InboxCursorKey(recipient string) string {
 	return c.roomPrefix() + ":inboxcursor:" + recipient
@@ -169,6 +303,49 @@ func (c Config) CatalogKey() string {
 func (c Config) TaskKey(id string) string {
 	return c.roomPrefix() + ":task:" + id
 }
+
+func (c Config) ResourceLeasePrefix() string {
+	if c.LeasePrefix != "" {
+		return c.LeasePrefix
+	}
+	return c.roomPrefix() + ":lease:"
+}
+func (c Config) ResourceLeaseIndexKey() string {
+	if c.LeaseIndexKey != "" {
+		return c.LeaseIndexKey
+	}
+	return c.roomPrefix() + ":leases"
+}
+func (c Config) ResourceLeaseKey(id string) string { return c.ResourceLeasePrefix() + id }
+func (c Config) CoordinationWindowPrefix() string {
+	if c.WindowPrefix != "" {
+		return c.WindowPrefix
+	}
+	return c.roomPrefix() + ":window:"
+}
+func (c Config) CoordinationWindowIndexKey() string {
+	if c.WindowIndexKey != "" {
+		return c.WindowIndexKey
+	}
+	return c.roomPrefix() + ":windows"
+}
+func (c Config) CoordinationWindowKey(id string) string { return c.CoordinationWindowPrefix() + id }
+func (c Config) CoordinationWindowAcksKey(id string) string {
+	return c.CoordinationWindowKey(id) + ":acks"
+}
+func (c Config) WorkStatusPrefix() string {
+	if c.WorkPrefix != "" {
+		return c.WorkPrefix
+	}
+	return c.roomPrefix() + ":work:"
+}
+func (c Config) WorkStatusIndexKey() string {
+	if c.WorkIndexKey != "" {
+		return c.WorkIndexKey
+	}
+	return c.roomPrefix() + ":work"
+}
+func (c Config) WorkStatusKey(id string) string { return c.WorkStatusPrefix() + id }
 
 // Task coordination states reported by TaskState.
 const (

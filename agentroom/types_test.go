@@ -161,6 +161,9 @@ func TestConfigCatalogAndTaskKeys(t *testing.T) {
 	if got, want := cfg.InboxKey("gary"), "repo:svc:dev:inbox:gary"; got != want {
 		t.Errorf("InboxKey() = %q, want %q", got, want)
 	}
+	if got, want := cfg.InboxRecipientIndexKey(), "repo:svc:dev:inbox-recipients"; got != want {
+		t.Errorf("InboxRecipientIndexKey() = %q, want %q", got, want)
+	}
 	if got, want := cfg.InboxCursorKey("gary"), "repo:svc:dev:inboxcursor:gary"; got != want {
 		t.Errorf("InboxCursorKey() = %q, want %q", got, want)
 	}

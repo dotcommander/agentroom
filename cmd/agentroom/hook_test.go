@@ -877,30 +877,9 @@ func runCLIWithStdinOutput(ctx context.Context, addr, input string, args ...stri
 		return "", err
 	}
 
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		return "", err
-	}
-	origStdout := os.Stdout
-	os.Stdout = outW
-	defer func() {
-		os.Stdout = origStdout
-		_ = outR.Close()
-	}()
-
-	runErr := runCLI(ctx, addr, args...)
-	closeErr := outW.Close()
-	data, readErr := io.ReadAll(outR)
-	if runErr != nil {
-		return string(data), runErr
-	}
-	if closeErr != nil {
-		return string(data), closeErr
-	}
-	if readErr != nil {
-		return string(data), readErr
-	}
-	return string(data), nil
+	var out bytes.Buffer
+	err = executeWithIO(ctx, append([]string{"--addr", addr}, args...), &out, &out)
+	return out.String(), err
 }
 
 func runCLIWithHookOutput(ctx context.Context, addr, input string, args ...string) (string, error) {
